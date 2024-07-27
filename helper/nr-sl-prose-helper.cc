@@ -38,8 +38,11 @@
 #include <ns3/config.h>
 #include <ns3/epc-ue-nas.h>
 #include <ns3/fatal-error.h>
+#include <ns3/ipv4-address.h>
+#include <ns3/ipv4-l3-protocol.h>
 #include <ns3/log.h>
 #include <ns3/lte-ue-rrc.h>
+#include <ns3/node.h>
 #include <ns3/nr-point-to-point-epc-helper.h>
 #include <ns3/nr-sl-ue-prose.h>
 #include <ns3/nr-sl-ue-rrc.h>
@@ -491,6 +494,57 @@ NrSlProseHelper::InstallNrSlDiscoveryConfiguration(NetDeviceContainer relays,
         Ptr<LteUeRrc> lteRemoteRrc = nrRemoteDev->GetRrc();
         Ptr<NrSlUeRrc> nrSlRemoteRrc = lteRemoteRrc->GetObject<NrSlUeRrc>();
         nrSlRemoteRrc->SetNrSlDiscoveryRemoteConfiguration(discConfig.slRemoteUeConfigCommon);
+    }
+}
+
+void
+NrSlProseHelper::ConfigureU2uRelayPath(Ipv4Address srcIp,
+                                       Ipv4Address tgtIp,
+                                       uint16_t tgtPort,
+                                       SidelinkInfo slInfo,
+                                       std::list<Ptr<NetDevice>> ueDevPath)
+{
+    NS_LOG_FUNCTION(this);
+
+    // Configure IDs in ProSe layer
+    for (auto& it : ueDevPath)
+    {
+        Ptr<NrUeNetDevice> ueNetDev = it->GetObject<NrUeNetDevice>();
+        Ptr<NrSlUeProse> ueProse = ueNetDev->GetObject<NrSlUeProse>();
+        Ptr<LteUeRrc> ueRrc = ueNetDev->GetRrc();
+        ueProse->SetImsi(ueRrc->GetImsi());
+        ueProse->SetL2Id(ueRrc->GetSourceL2Id());
+        ueProse->ConfigureUnicast();
+    }
+
+    // Configure src->tgt path
+    for (std::list<Ptr<NetDevice>>::iterator it = ueDevPath.begin(); it != ueDevPath.end(); it++)
+    {
+        if (it != std::prev(ueDevPath.end()))
+        {
+            Ptr<NrSlUeProse> ueProse = (*it)->GetObject<NrUeNetDevice>()->GetObject<NrSlUeProse>();
+            uint32_t nextHopL2Id =
+                (*std::next(it))->GetObject<NrUeNetDevice>()->GetObject<NrSlUeProse>()->GetL2Id();
+            Ipv4Address ueIp =
+                (*it)->GetNode()->GetObject<Ipv4L3Protocol>()->GetAddress(1, 0).GetLocal();
+            ueProse->ConfigureU2uNexthop(tgtIp, tgtPort, nextHopL2Id, slInfo, ueIp);
+        }
+    }
+
+    // Configure tft->src path
+    for (std::list<Ptr<NetDevice>>::reverse_iterator rit = ueDevPath.rbegin();
+         rit != ueDevPath.rend();
+         rit++)
+    {
+        if (rit != std::prev(ueDevPath.rend()))
+        {
+            Ptr<NrSlUeProse> ueProse = (*rit)->GetObject<NrUeNetDevice>()->GetObject<NrSlUeProse>();
+            uint32_t nextHopL2Id =
+                (*std::next(rit))->GetObject<NrUeNetDevice>()->GetObject<NrSlUeProse>()->GetL2Id();
+            Ipv4Address ueIp =
+                (*rit)->GetNode()->GetObject<Ipv4L3Protocol>()->GetAddress(1, 0).GetLocal();
+            ueProse->ConfigureU2uNexthop(srcIp, tgtPort, nextHopL2Id, slInfo, ueIp);
+        }
     }
 }
 

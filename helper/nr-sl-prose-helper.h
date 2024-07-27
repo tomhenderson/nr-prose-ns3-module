@@ -276,6 +276,22 @@ class NrSlProseHelper : public Object
                                     EpsBearer bearer);
 
     /**
+     * Configures a path between a source UE and a destination UE by using
+     * U2U relays if applicable
+     *
+     * \param srcIp the IP address of the source UE
+     * \param dstIp the IP address of the destination UE
+     * \param dstPort the port used for communicaiton
+     * \param slInfo the parameters to be used for the sidelink data radio bearer
+     * \param ueDevPath the list of UE net devices forming the path
+     */
+    void ConfigureU2uRelayPath(Ipv4Address srcIp,
+                               Ipv4Address dstIp,
+                               uint16_t dstPort,
+                               SidelinkInfo slInfo,
+                               std::list<Ptr<NetDevice>> ueDevPath);
+
+    /**
      * \brief Install NR Sidelink relay discovery/(re)selection configuration for both remote and
      * relay UEs
      *

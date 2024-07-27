@@ -48,7 +48,7 @@
 
 #include <unordered_map>
 
-//#include <ns3/nr-sl-prose-relay-handle.h>
+// #include <ns3/nr-sl-prose-relay-handle.h>
 
 namespace ns3
 {
@@ -464,6 +464,21 @@ class NrSlUeProse : public NrSlUeService
 
     ///< Frequency of Discovery messages in seconds
     Time m_discoveryInterval;
+
+    /**
+     * Instructs lower layers to configure how to reach the next hop in a path.
+     *
+     * \param tgtIp the IP address of the target UE in the path
+     * \param tgtPort the port used for the traffic in the path
+     * \param nextHopL2Id the layer 2 ID of the next hop peer UE
+     * \param slInfo the parameters to be used for the sidelink data radio bearer
+     * \param myIp the IP address of this UE
+     */
+    void ConfigureU2uNexthop(Ipv4Address tgtIp,
+                             uint16_t tgtPort,
+                             uint32_t nextHopL2Id,
+                             SidelinkInfo slInfo,
+                             Ipv4Address myIp);
 
   private:
     // NrSlUeSvcRrcSapUser methods

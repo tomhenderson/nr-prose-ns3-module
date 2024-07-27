@@ -1367,4 +1367,33 @@ NrSlUeProse::SetNetDevice(Ptr<NetDevice> dev)
     m_ueDevice = dev;
 }
 
+void
+NrSlUeProse::ConfigureU2uNexthop(Ipv4Address tgtIp,
+                                 uint16_t tgtPort,
+                                 uint32_t nextHopL2Id,
+                                 SidelinkInfo slInfo,
+                                 Ipv4Address myIp)
+{
+    NS_LOG_FUNCTION(this << tgtIp << nextHopL2Id << myIp);
+
+    SidelinkInfo slInfoNew;
+    // copy values from template
+    slInfoNew.m_castType = slInfo.m_castType;
+    slInfoNew.m_harqEnabled = slInfo.m_harqEnabled;
+    slInfoNew.m_pdb = slInfo.m_pdb;
+    slInfoNew.m_dynamic = slInfo.m_dynamic;
+    slInfoNew.m_rri = slInfo.m_rri;
+    slInfoNew.m_priority = slInfo.m_priority;
+
+    // Assing destination
+    slInfoNew.m_dstL2Id = nextHopL2Id;
+
+    // Instruct NAS to setup TFTs and instruct RRC to create the corresponding bearer
+    m_nrSlUeSvcNasSapProvider->ConfigureNrSlDataRadioBearersForU2uRelay(nextHopL2Id,
+                                                                        tgtIp,
+                                                                        tgtPort,
+                                                                        myIp,
+                                                                        slInfoNew);
+}
+
 } // namespace ns3
