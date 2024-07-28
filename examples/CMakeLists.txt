@@ -9,6 +9,7 @@ set(nr-prose-examples_flowmon_examples
     nr-prose-unicast-l3-relay
     nr-prose-network-coex
     nr-prose-l3-relay
+    nr-prose-u2u-multihop
 )
 foreach(
   example
