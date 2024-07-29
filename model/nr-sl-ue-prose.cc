@@ -212,7 +212,7 @@ NrSlUeProse::DoNotifySvcNrSlDataRadioBearerRemoved(uint32_t peerL2Id)
     auto it = m_unicastDirectLinks.find(peerL2Id);
     if (it == m_unicastDirectLinks.end())
     {
-        NS_FATAL_ERROR("Could not find the direct link");
+       NS_LOG_DEBUG ("Could not find the direct link");
     }
     else
     {

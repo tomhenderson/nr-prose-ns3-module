@@ -10,6 +10,7 @@ set(nr-prose-examples_flowmon_examples
     nr-prose-network-coex
     nr-prose-l3-relay
     nr-prose-u2u-multihop
+    nr-prose-u2u-multihop-routing
 )
 foreach(
   example
@@ -32,6 +33,10 @@ foreach(
     LIBRARIES_TO_LINK ${libnr}
                       ${libnr-prose}
                       ${libflow-monitor}
+                      ${libolsr}
+                      ${libbatmand}
+                      ${libdsdv}
+                      ${libaodv}
   )
 endforeach()
 
