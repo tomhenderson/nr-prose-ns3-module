@@ -67,6 +67,7 @@ $ ./ns3 run "nr-prose-u2u-multihop-routing --help"
 #include "ns3/aodv-module.h"
 #include "ns3/dsdv-module.h"
 #include "ns3/nr-prose-module.h"
+#include "ns3/spectrum-module.h"
 
 using namespace ns3;
 
@@ -616,6 +617,7 @@ main (int argc, char *argv[])
 
   uint16_t nPaths = 1;
 
+  std::string propagationType = "3GPP";
 
   // Simulation timeline parameters
   Time startTrafficTime = Seconds (30.0); //Time to start the traffic in the application layer.
@@ -648,6 +650,7 @@ main (int argc, char *argv[])
   cmd.AddValue ("packetSizeBe", "packet size in bytes to be used by the traffic", udpPacketSize);
   cmd.AddValue ("dataRate", "The data rate in kilobits per second", dataRate);
   cmd.AddValue ("nPaths", "The number of path to create", nPaths);
+  cmd.AddValue ("propagationType", "The propagation type to use", propagationType);
 
   // Parse the command line
   cmd.Parse (argc, argv);
@@ -734,13 +737,14 @@ main (int argc, char *argv[])
    * centered at the frequency specified by the input parameters.
    */
   BandwidthPartInfoPtrVector allBwps;
-  CcBwpCreator ccBwpCreator;
+  std::vector<std::unique_ptr<BandwidthPartInfo> > bwpVector;
+  CcBwpCreator ccBwpCreator; // This object needs to stay in scope
   const uint8_t numCcPerBand = 1;
 
   //Create the configuration for the CcBwpHelper. SimpleOperationBandConfcreates a single BWP per CC
   CcBwpCreator::SimpleOperationBandConf bandConfSl (centralFrequencyBandSl, bandwidthBandSl,
   //                                                  numCcPerBand, BandwidthPartInfo::V2V_Highway);
-                                                    numCcPerBand, BandwidthPartInfo::RMa_LoS);
+                                                     numCcPerBand, BandwidthPartInfo::RMa_LoS);
 
   // By using the configuration created, it is time to make the operation bands
   OperationBandInfo bandSl = ccBwpCreator.CreateOperationBandContiguousCc (bandConfSl);
@@ -759,8 +763,28 @@ main (int argc, char *argv[])
   auto bandMask = NrHelper::INIT_PROPAGATION | NrHelper::INIT_CHANNEL;
   //bandMask |= NrHelper::INIT_FADING;
 
-  nrHelper->InitializeOperationBand (&bandSl, bandMask);
-  allBwps = CcBwpCreator::GetAllBwps ({bandSl});
+  if (propagationType == "3GPP")
+  {
+      nrHelper->InitializeOperationBand (&bandSl, bandMask);
+      allBwps = CcBwpCreator::GetAllBwps ({bandSl});
+  }
+  else if (propagationType == "AWGN")
+  {
+      std::unique_ptr<BandwidthPartInfo> bwp1 (new BandwidthPartInfo (1, centralFrequencyBandSl, bandwidthBandSl));
+      auto spectrumChannel = CreateObject<MultiModelSpectrumChannel> ();
+      // Default range is 250 m
+      auto propagationLoss = CreateObject<RangePropagationLossModel> ();
+      spectrumChannel->AddPropagationLossModel (propagationLoss);
+      bwp1->m_channel = spectrumChannel;
+      bwpVector.emplace_back(std::move(bwp1)); // Move ownership to the vector
+      auto ref1 = std::ref(bwpVector[0]);
+      allBwps.push_back(ref1);
+  }
+  else
+  {
+      std::cout << "Unknown propagation type " << propagationType << std::endl;
+      exit(1);
+  }
 
   //Packet::EnableChecking (); //BATAMAN DOESN'T WORK IF THIS IS ENABLED!
   Packet::EnablePrinting ();
