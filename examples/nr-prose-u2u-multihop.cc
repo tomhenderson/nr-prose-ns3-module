@@ -206,26 +206,28 @@ uint32_t txPktCounter = 0;
  * \brief Method to listen to the packet sink application trace Rx.
  * \param packet The packet
  * \param The address of the transmitter
+ * TODO
  */
 void
-ReceivePacket (Ptr<const Packet> packet, const Address &from [[maybe_unused]])
+ReceivePacket (Ptr<const Packet> packet, const Address &from , const Address & to, const SeqTsSizeHeader &header)
 {
-  rxByteCounter += packet->GetSize ();
+  rxByteCounter += header.GetSize ();
   rxPktCounter++;
-  //std::cout <<Simulator::Now().GetMilliSeconds() << " Rx" <<std::endl;
+//  std::cout <<Simulator::Now().GetSeconds() << " APP -> Rx " <<  header.GetSeq () <<std::endl;
 
 }
 
 /**
  * \brief Method to listen to the transmitting application trace Tx.
- * \param packet The packet
+ * \param packet The packet 
+ * TODO
  */
 void
-TransmitPacket (Ptr<const Packet> packet)
+TransmitPacket (Ptr<const Packet> packet, const Address &from, const Address & to, const SeqTsSizeHeader &header)
 {
-  txByteCounter += packet->GetSize ();
+  txByteCounter += header.GetSize ();
   txPktCounter++;
-  //std::cout <<Simulator::Now().GetMilliSeconds() << " Tx" <<std::endl;
+//  std::cout <<Simulator::Now().GetSeconds() << " APP -> Tx " <<  header.GetSeq () <<std::endl;
 }
 
 
@@ -1106,13 +1108,16 @@ main (int argc, char *argv[])
   bool bidirectional = false;
 
   // Simulation timeline parameters
-  Time trafficDuration = Seconds (30.0); //Total simulation time
+//  Time trafficDuration = Seconds (600.0); 
+  Time trafficDuration = Seconds (30.0); 
   Time startTrafficTime = Seconds (3.0); //Time to start the traffic in the application layer. Will be adapted if discovery is used
 
   // NR parameters
   uint16_t numerologyBwpSl = 0; //The numerology to be used in sidelink bandwidth part
   double centralFrequencyBandSl = 5.89e9; // band n47  TDD //Here band is analogous to channel
   double bandwidthBandSl = 40e6; //40 MHz
+//  double bandwidthBandSl = 5e6; //40 MHz   //TODO: Change!
+
   double txPower = 23; //dBm
   uint32_t mcs = 5; 
 
@@ -1178,10 +1183,10 @@ main (int argc, char *argv[])
   //Linear
   if (deployment == "Linear")
   {
-    double interUeDistance = d / nUes;
+    double interUeDistance = d / (nUes-1);
     for (uint16_t i = 0; i < nUes; i++)
       {
-        listPositionAllocator->Add (Vector (interUeDistance * i, 0.0, 1.5));
+        listPositionAllocator->Add (Vector (interUeDistance * i, d/2, 1.5));
       }
     mobility.SetPositionAllocator (listPositionAllocator);
     mobility.Install (ueNodes);
@@ -1260,7 +1265,7 @@ main (int argc, char *argv[])
    * of all the spectrum initialization needs.
    */
   auto bandMask = NrHelper::INIT_PROPAGATION | NrHelper::INIT_CHANNEL;
-  bandMask |= NrHelper::INIT_FADING;
+  //bandMask |= NrHelper::INIT_FADING;
 
   nrHelper->InitializeOperationBand (&bandSl, bandMask);
   allBwps = CcBwpCreator::GetAllBwps ({bandSl});
@@ -1294,6 +1299,7 @@ main (int argc, char *argv[])
     case 0:
       //t2 = 33; // with T1 = 2, this gives a window of 32 slots with mu = 0 => 32 ms
       t2 = 17; // with T1 = 2, this gives a window of 16 slots with mu = 0 => 16 ms
+      //t2 = 9; // with T1 = 2, this gives a window of 8 slots with mu = 0 => 8 ms
 
       break;
     case 1:
@@ -1303,6 +1309,8 @@ main (int argc, char *argv[])
     case 2:
       //t2 = 33; // with T1 = 2, this gives a window of 32 slots with mu = 2 => 8 ms
       t2 = 65; // with T1 = 2, this gives a window of 64 slots with mu = 2 => 16 ms
+      //t2 = 17; // with T1 = 2, this gives a window of 16 slots with mu = 2 => 4 ms
+
       break;
 
     default:
@@ -1377,7 +1385,7 @@ main (int argc, char *argv[])
   //get it from pool factory
   Ptr<NrSlCommResourcePoolFactory> ptrFactory = Create<NrSlCommResourcePoolFactory> ();
   //Configure specific parameters of interest:
-  std::vector<std::bitset<1>> slBitmap = {1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1};
+  std::vector<std::bitset<1>> slBitmap = {1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1 };
   ptrFactory->SetSlTimeResources (slBitmap);
   ptrFactory->SetSlSensingWindow (100); // T0 in ms
   ptrFactory->SetSlSelectionWindow (5);
@@ -1438,7 +1446,7 @@ main (int argc, char *argv[])
 
   //Configure the TddUlDlConfigCommon IE
   LteRrcSap::TddUlDlConfigCommon tddUlDlConfigCommon;
-  tddUlDlConfigCommon.tddPattern = "DL|DL|DL|F|UL|UL|UL|UL|UL|UL|";
+  tddUlDlConfigCommon.tddPattern = "UL|UL|UL|UL|UL|UL|UL|UL|UL|UL|";
 
   //Configure the SlPreconfigGeneralNr IE
   LteRrcSap::SlPreconfigGeneralNr slPreconfigGeneralNr;
@@ -1510,13 +1518,15 @@ main (int argc, char *argv[])
   // Install ProSe layer and corresponding SAPs in the UEs
   nrSlProseHelper->PrepareUesForProse (uesNetDev);
 
-  //Selecting ramson relays, finding paths, configuring them, etc. 
+  //Selecting random relays, finding paths, configuring them, etc. 
   std::map<uint16_t, FlowInfo> flowsInfo;
   std::cout << "Selecting random relays... "<< std::endl;
 
   //Random variable for selecting relays
   Ptr<ns3::UniformRandomVariable> randomVariableRelays = CreateObject<ns3::UniformRandomVariable>();
   randomVariableRelays->SetStream (70000); //Fix stream to have same results for each Run indepently of previous random variables creations
+
+
 
   std::vector<uint32_t> selectedRelays = SelectRandomRelays(ueNodes, std::ceil(nUes * relayDensity), randomVariableRelays);
   std::cout << "Selected Relays Node IDs: ";
@@ -1556,15 +1566,26 @@ main (int argc, char *argv[])
     uint32_t srcNodeId, tgtNodeId;
     do
     {
-      if (allowRelayEndNode)
+      
+      if (deployment == "Linear")
       {
-        srcNodeId = GetRandomNodeId (ueNodes, randomVariableNodes);
-        tgtNodeId = GetRandomNodeId (ueNodes, randomVariableNodes);
+        srcNodeId = ueNodes.Get(0)->GetId ();
+        tgtNodeId = ueNodes.Get(ueNodes.GetN() - 1)->GetId ();
       }
       else 
       {
-        srcNodeId = GetRandomNodeIdExcludeRelays(ueNodes, selectedRelays, randomVariableNodes);
-        tgtNodeId = GetRandomNodeIdExcludeRelays(ueNodes, selectedRelays, randomVariableNodes);
+        if (allowRelayEndNode)
+        {
+          srcNodeId = GetRandomNodeId (ueNodes, randomVariableNodes);
+          tgtNodeId = GetRandomNodeId (ueNodes, randomVariableNodes);
+//          tgtNodeId = 0; //TODO: Only for NPSTC Change!!!!
+
+        }
+        else 
+        {
+          srcNodeId = GetRandomNodeIdExcludeRelays(ueNodes, selectedRelays, randomVariableNodes);
+          tgtNodeId = GetRandomNodeIdExcludeRelays(ueNodes, selectedRelays, randomVariableNodes);
+        }
       }
     } 
     while (srcNodeId == tgtNodeId || usedNodePairs.find(std::make_pair(srcNodeId, tgtNodeId)) != usedNodePairs.end());
@@ -1853,11 +1874,12 @@ main (int argc, char *argv[])
 
   //Trace receptions; use the following to be robust to node ID changes
   std::ostringstream path;
-  path << "/NodeList/*/ApplicationList/*/$ns3::PacketSink/Rx";
+  path << "/NodeList/*/ApplicationList/*/$ns3::PacketSink/RxWithSeqTsSize";
   Config::ConnectWithoutContext (path.str (), MakeCallback (&ReceivePacket));
+  
   path.str ("");
 
-  path << "/NodeList/*/ApplicationList/*/$ns3::OnOffApplication/Tx";
+  path << "/NodeList/*/ApplicationList/*/$ns3::OnOffApplication/TxWithSeqTsSize";
   Config::ConnectWithoutContext (path.str (), MakeCallback (&TransmitPacket));
   path.str ("");
 
@@ -2159,7 +2181,7 @@ main (int argc, char *argv[])
   }
   outFileSys << ratioPathsFound 
              << std::endl;
-  outFile.close ();
+  outFileSys.close ();
 
   std::cout << "System statistics: " << std::endl;
   std::ifstream fs (filenameSys.c_str ());
@@ -2242,6 +2264,48 @@ main (int argc, char *argv[])
   std::cout << "Balance Control: " << totalnTxCtrl - totalnRxCtrl - totalnCorruptRxCtrl - totalnHdRxCtrl <<std::endl;
   std::cout << "Balance Data: " <<totalnTxData - totalnRxData - totalnCorruptRxData - totalnHdRxData - totalnIgnoredData <<std::endl;
   
+  //Ouput per node PHY stats to csv
+  std::ofstream outFileSysPhyPerNode;
+  std::string filenamePhyStatPerNodes = "simPhyStats_perNode.csv";
+  outFileSysPhyPerNode.open (filenamePhyStatPerNodes.c_str (), std::ofstream::out | std::ofstream::trunc);
+  if (!outFileSysPhyPerNode.is_open ())
+  {
+    std::cerr << "Can't open file " << filename << std::endl;
+    return 1;
+  }
+  outFileSysPhyPerNode.setf (std::ios_base::fixed);
+  outFileSysPhyPerNode << "RngSeed,RngRun,";
+  outFileSysPhyPerNode << "NodeID" << ","
+                       << "L2ID" << ","
+                       << "nTxCtrl" << ","
+                       <<  "nTxData" << ","
+                       << "nRxCtrl" << ","
+                       << "nRxData" << ","
+                       << "nCorruptRxCtrl" << ","
+                       << "nCorruptRxData" << ","
+                       << "nHdRxCtrl" << ","
+                       << "nHdRxData" << ","
+                       << "nIgnoredData\n";
+  for (const auto& [nodeId, stats] : nodePhyStats) 
+  {
+    outFileSysPhyPerNode << RngSeedManager::GetSeed ()<< ","
+                         << RngSeedManager::GetRun ()<< ",";
+    outFileSysPhyPerNode << stats->m_nodeId << ","
+                         << stats->m_l2Id << ","
+                         << stats->m_stats.nTxCtrl << ","
+                         << stats->m_stats.nTxData << ","
+                         << stats->m_stats.nRxCtrl << ","
+                         << stats->m_stats.nRxData << ","
+                         << stats->m_stats.nCorruptRxCtrl << ","
+                         << stats->m_stats.nCorruptRxData << ","
+                         << stats->m_stats.nHdRxCtrl << ","
+                         << stats->m_stats.nHdRxData << ","
+                         << stats->m_stats.nIgnoredData << "\n";
+  }
+  outFileSysPhyPerNode.close ();
+
+
+  //Output total PHY stats to csv
   std::ofstream outFileSysPhy;
   std::string filenamePhyStats = "simPhyStats.csv";
   outFileSysPhy.open (filenamePhyStats.c_str (), std::ofstream::out | std::ofstream::trunc);

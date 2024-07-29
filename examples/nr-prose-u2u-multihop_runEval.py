@@ -7,9 +7,10 @@ import time
 
 import matplotlib.pyplot as plt
 import numpy as np
+import matplotlib.ticker as ticker
 
 # Set number of runs per evaluation
-nRuns=100
+nRuns=20
 
 # Set number of simultaneous processes
 nProcesses = 100
@@ -46,15 +47,15 @@ def start_simulation(runParams):
     except FileExistsError:
       print("folder %s already exists, overwriting..." % runDir)
 
-    #Run the simulation
+     #Run the simulation
     run_command = f"./ns3 run --cwd={runDir} nr-prose-u2u-multihop -- --RngRun={rngRun} --nUes={nUes} --deployment={deployment} --d={d} --relayDensity={relayDensity} --nPaths={nPaths}  --pathFindingAlgo={pathFindingAlgo} --distanceConstraint={distanceConstraint}  --rsrpConstraint={rsrpConstraint} --maxNumRelays={maxNumRelays} --allowReverse={allowReverse} --allowRelayEndNode={allowRelayEndNode} --packetSizeBe={packetSizeBe} --dataRate={dataRate}  --bidirectional={bidirectional} --mu={mu} --maxNumTx={maxNumTx} --dynSch={dynSch} --sensing={sensing}"
     print (run_command)
     with open(runDir + "/output.txt", "w") as f:
         output = subprocess.run(run_command.split(), stdout=f, stderr=subprocess.STDOUT)
         f.close()
     #Run the processing script
-    subprocess.run(["python3", "nr-prose-u2u-multihop_plotSimStats.py", runDir], check=True) 
-
+    subprocess.run(["python3", "nr-prose-u2u-multihop_plotSimStats.py", runDir], check=True)
+ 
     
 # Function that creates the evaluation folder and calls start_simulation for every run
 def start_evaluation(params):
@@ -151,6 +152,109 @@ def start_evaluation(params):
 
     return outputDir
 
+
+#Function used for the higher level postprocesing
+def plot_with_error_bars(csv_file, x_column, y_column, set_column, campaignPrefix):
+    # Read data from CSV
+    with open(csv_file, mode='r') as file:
+        reader = csv.DictReader(file)
+        
+        # Initialize data containers
+        data_by_set = {}
+
+        for row in reader:
+            set_value = row[set_column]
+            x_value = float(row[x_column])
+            mean, ci = map(float, row[y_column].strip("()").split(','))
+            nUEs = int(row['nUEs'])
+            interUeDistance = float(row['interUeDistance'])
+            d_value = (nUEs - 1) * interUeDistance
+            
+            if set_value not in data_by_set:
+                data_by_set[set_value] = {'x': [], 'mean': [], 'ci': [], 'd': []}
+
+            data_by_set[set_value]['x'].append(x_value)
+            data_by_set[set_value]['mean'].append(mean)
+            data_by_set[set_value]['ci'].append(ci)
+            data_by_set[set_value]['d'].append(d_value)
+            
+    # Sort sets by numeric order if possible
+    def sort_key(item):
+        try:
+            return float(item)
+        except ValueError:
+            return item
+
+    sorted_sets = sorted(data_by_set.keys(), key=sort_key)
+    
+
+    # Set default font sizes
+    plt.rcParams.update({'font.size': 12, 'legend.fontsize': 'medium'})
+
+    # Create subplots
+    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(8, 10), sharex=True)
+    
+    # Colors for each set
+    colors = plt.cm.tab10(np.linspace(0, 1, len(sorted_sets)))
+    set_colors = {set_value: color for set_value, color in zip(sorted_sets, colors)}
+    
+    # Plot data for each sorted set
+    for set_value in sorted_sets:
+        data = data_by_set[set_value]
+        sorted_indices = np.argsort(data['x'])
+        x_sorted = np.array(data['x'])[sorted_indices]
+        mean_sorted = np.array(data['mean'])[sorted_indices]
+        ci_sorted = np.array(data['ci'])[sorted_indices]
+        d_sorted = np.array(data['d'])[sorted_indices]
+        
+        # Plot first subplot
+        ax1.errorbar(x_sorted, mean_sorted, yerr=ci_sorted, fmt='o-', label=set_value, color=set_colors[set_value])
+        
+        # Plot second subplot
+        ax2.plot(x_sorted, d_sorted, 'x-', label=f"{set_value}", color=set_colors[set_value])
+
+    # Additional settings for avgFlowLossRatio
+    # Check if we are plotting avgFlowLossRatio and need to add horizontal lines
+    if y_column == 'avgFlowLossRatio':
+        ax1.set_yscale('log')
+        ax1.set_ylim([0.0001,1])
+        lines = []  # List to keep track of the line objects for the legend
+        for y_line, style in zip([0.02, 0.05, 0.1], ['--', '-.', ':']):
+            lines.append(ax1.axhline(y=y_line, color='gray', linestyle=style))
+
+    # After all plotting is done, handle the legend
+    handles, labels = ax1.get_legend_handles_labels()
+    if y_column == 'avgFlowLossRatio':
+        # Add the horizontal line legend entries at the end
+        for i, y_line in enumerate([0.02, 0.05, 0.1]):
+            # Create custom handles for the horizontal lines
+            handles.append(lines[i])
+            labels.append(f'y={y_line}')
+
+    # Now set the updated handles and labels for the legend of ax1
+    ax1.legend(handles, labels, title=set_column, bbox_to_anchor=(1.02, 1), loc='upper left')
+
+#    ax1.set_title(f"{y_column} by {x_column} for each {set_column}")
+    ax1.set_xlabel(x_column)
+    ax1.set_ylabel(y_column)
+    ax1.grid(True, which='major', color='#cccccc', linestyle='-', linewidth=0.5)
+    ax1.tick_params(axis='x', which='both', bottom=True, top=False, labelbottom=True)
+
+#    ax2.set_title(f'Calculated d = (nUEs-1) * interUeDistance by {set_column}')
+    ax2.set_xlabel(x_column)
+    ax2.set_ylabel('d (m)')
+    ax2.yaxis.set_major_locator(ticker.MultipleLocator(1000))
+    ax2.legend(title=set_column, bbox_to_anchor=(1.02, 1), loc='upper left')
+    ax2.grid(True, which='major', color='#cccccc', linestyle='-', linewidth=0.5)
+
+    plt.tight_layout()
+    plt.tight_layout()
+    png_file_name = f"{campaignPrefix}_X-{x_column}_Y-{y_column}_Set-{set_column}.png"
+    plt.savefig(png_file_name)
+    plt.close()  # Close the plot
+
+
+
 #######################################################################################################
 ########################################### Main script ###############################################
 #######################################################################################################
@@ -205,62 +309,166 @@ sensing=True
 #################################
 
 
-
+# Baseline campaign varying maxNumRelays  
+""" 
+#TODO:Postprocessing not working for this one. DEBUG!
 campaignName=""
 for i in [1]:
 
+    evalFolders = {}  # Dictionary to store maxNumRelays and corresponding eval folder
+
     if i == 1:
-        campaignName=f"z_1_BL"
+        campaignName=f"z_0_BL"
 
     # Start evaluations for the campaign
 
-    #Eval 1
-    maxNumRelays=0
-    params = (campaignName, nUes, deployment, d, relayDensity, nPaths, pathFindingAlgo, distanceConstraint, rsrpConstraint, maxNumRelays, allowReverse, allowRelayEndNode, packetSizeBe, dataRate, bidirectional, mu, maxNumTx, dynSch, sensing)
-    evalFolder_1=start_evaluation (params)
-    print(f"Eval folder: %s" % (evalFolder_1))
+    for maxNumRelays in [0,1,2,3,4]: 
+        params = (campaignName, nUes, deployment, d, relayDensity, nPaths, pathFindingAlgo, distanceConstraint, rsrpConstraint, maxNumRelays, allowReverse, allowRelayEndNode, packetSizeBe, dataRate, bidirectional, mu, maxNumTx, dynSch, sensing)
+        evalFolder = start_evaluation(params)
+        evalFolders[maxNumRelays] = evalFolder
+        print(f"Eval folder for maxNumRelays {maxNumRelays}: {evalFolder}")
 
-    #Eval 2
-    maxNumRelays=1
-    params = (campaignName, nUes, deployment, d, relayDensity, nPaths, pathFindingAlgo, distanceConstraint, rsrpConstraint, maxNumRelays, allowReverse, allowRelayEndNode, packetSizeBe, dataRate, bidirectional, mu, maxNumTx, dynSch, sensing)
-    evalFolder_2=start_evaluation (params)
-    print(f"Eval folder: %s" % (evalFolder_2))
+    # Now, prepare the parameters for the script
+    scriptParam = ["python3", "nr-prose-u2u-multihop_plotEvalStats.py", "--campaignName", campaignName, "--campaignLabel", "maxNRelays"]
 
-    #Eval 3
-    maxNumRelays=2
-    params = (campaignName, nUes, deployment, d, relayDensity, nPaths, pathFindingAlgo, distanceConstraint, rsrpConstraint, maxNumRelays, allowReverse, allowRelayEndNode, packetSizeBe, dataRate, bidirectional, mu, maxNumTx, dynSch, sensing)
+    for maxNumRelays, folder in evalFolders.items():
+        scriptParam.extend(["--eval", folder, str(maxNumRelays)])
 
-    evalFolder_3=start_evaluation (params)
-    print(f"Eval folder: %s" % (evalFolder_3))
+    subprocess.run(scriptParam, check=True) """
+ 
 
-    #Eval 4
-    maxNumRelays=3
-    params = (campaignName, nUes, deployment, d, relayDensity, nPaths, pathFindingAlgo, distanceConstraint, rsrpConstraint, maxNumRelays, allowReverse, allowRelayEndNode, packetSizeBe, dataRate, bidirectional, mu, maxNumTx, dynSch, sensing)
 
-    evalFolder_4=start_evaluation (params)
-    print(f"Eval folder: %s" % (evalFolder_4)) 
 
-    #Eval 5
-    maxNumRelays=4
-    params = (campaignName, nUes, deployment, d, relayDensity, nPaths, pathFindingAlgo, distanceConstraint, rsrpConstraint, maxNumRelays, allowReverse, allowRelayEndNode, packetSizeBe, dataRate, bidirectional, mu, maxNumTx, dynSch, sensing)
+""" # NPSTC campaign varying maxNumRelays  
+#packetSizeBe=320 #1 pcket every 10 ms
+packetSizeBe=640 #Larger packet less often (20ms)
+dataRate=256
+dynSch=True
+sensing=False
+campaignName=""
+rsrpConstraint=1e-11 # 110 dBm
+maxRel=4
 
-    evalFolder_5=start_evaluation (params)
-    print(f"Eval folder: %s" % (evalFolder_5))
+for i in [3, 6]:
 
-    # Create campaign plots with all evaluations
-    scriptParam = [
-        "python3",
-        "nr-prose-u2u-multihop_plotEvalStats.py",
-        "--campaignName", campaignName,
-        "--campaignLabel", "maxNRelays",
-        "--eval", evalFolder_1, "0",
-        "--eval", evalFolder_2, "1",
-        "--eval", evalFolder_3, "2",
-        "--eval", evalFolder_4, "3",
-        "--eval", evalFolder_5, "4"
-    ]
+    evalFolders = {}  # Dictionary to store maxNumRelays and corresponding eval folder
 
-    subprocess.run(scriptParam, check=True)
+    if i == 1:
+        nUes=46
+        d=1200
+        maxRel=4
+        nPaths=1
+        campaignName=f"z_30_NPSTC_nUes-{nUes}_d-{d}_nPaths-{nPaths}"
+
+    if i == 2:
+        #nUes=184
+        nUes=46
+        d=2400
+        maxRel=8
+        nPaths=1
+        campaignName=f"z_31_NPSTC_nUes-{nUes}_d-{d}_nPaths-{nPaths}"
+
+    if i == 3:
+ #       nUes=750
+        nUes=184
+        d=4750
+        maxRel=16
+        nPaths=1
+        campaignName=f"z_36_NPSTC_nUes-{nUes}_d-{d}_nPaths-{nPaths}"
+
+    if i == 4:
+        nUes=46
+        d=1200
+        maxRel=4
+        nPaths=3
+        campaignName=f"z_33_NPSTC_nUes-{nUes}_d-{d}_nPaths-{nPaths}"
+
+    if i == 5:
+        #nUes=184
+        nUes=46
+        d=2400
+        maxRel=8
+        nPaths=3
+        campaignName=f"z_34_NPSTC_nUes-{nUes}_d-{d}_nPaths-{nPaths}"
+
+    if i == 6:
+#       nUes=750
+        nUes=184
+        d=4750
+        maxRel=16
+        nPaths=3
+        campaignName=f"z_37_NPSTC_nUes-{nUes}_d-{d}_nPaths-{nPaths}" 
+
+
+
+    # Start evaluations for the campaign
+
+    for maxNumRelays in range (maxRel +1): #Iterate from 0 to maxRel
+        params = (campaignName, nUes, deployment, d, relayDensity, nPaths, pathFindingAlgo, distanceConstraint, rsrpConstraint, maxNumRelays, allowReverse, allowRelayEndNode, packetSizeBe, dataRate, bidirectional, mu, maxNumTx, dynSch, sensing)
+        evalFolder = start_evaluation(params)
+        evalFolders[maxNumRelays] = evalFolder
+        print(f"Eval folder for maxNumRelays {maxNumRelays}: {evalFolder}")
+
+    # Now, prepare the parameters for the script
+    scriptParam = ["python3", "nr-prose-u2u-multihop_plotEvalStats.py", "--campaignName", campaignName, "--campaignLabel", "maxNRelays"]
+
+    for maxNumRelays, folder in evalFolders.items():
+        scriptParam.extend(["--eval", folder, str(maxNumRelays)])
+
+    subprocess.run(scriptParam, check=True)"""
+
+
+
+
+
+#Campaing for seeing delay depending on inter UE distance
+deployment="Linear"
+relayDensity=1.0
+nPaths=1
+pathFindingAlgo="DistShortest"
+mu=0
+dynSch=False
+
+campaignPrefix="z_2"
+campaignName=""
+#for nUes in [2, 3, 4, 5, 6, 7, 8, 9, 10]:
+for nUes in [10]:
+
+    evalFolders = {}  # Dictionary to store maxNumRelays and corresponding eval folder
+    campaignName=f"{campaignPrefix}_nUes-{nUes}"
+
+    # Start evaluations for the campaign
+#    for iud in [100, 200, 300, 400, 500, 600, 700, 800, 900, 1000]: 
+    for iud in [500, 800]: 
+#    for iud in [100, 200, 300, 400, 500, 600, 700, 800, 900, 1000, 1100, 1200]: 
+        d=iud * (nUes -1) 
+        distanceConstraint=iud+1
+        maxNumRelays=nUes
+
+        params = (campaignName, nUes, deployment, d, relayDensity, nPaths, pathFindingAlgo, distanceConstraint, rsrpConstraint, maxNumRelays, allowReverse, allowRelayEndNode, packetSizeBe, dataRate, bidirectional, mu, maxNumTx, dynSch, sensing)
+        evalFolder = start_evaluation(params)
+        evalFolders[iud] = evalFolder
+        print(f"Eval folder for iud {iud}: {evalFolder}")
+
+    # Now, prepare the parameters for the script
+    scriptParam = ["python3", "nr-prose-u2u-multihop_plotEvalStats.py", "--campaignName", campaignName, "--campaignLabel", "interUeDistance"]
+
+    for iud, folder in evalFolders.items():
+        scriptParam.extend(["--eval", folder, str(iud)])
+
+    subprocess.run(scriptParam, check=True)   
+
+
+#The data for the following plots has been curated by hand:
+# campaignPrefix="z_20"
+# plot_with_error_bars('z_20_nUes-All_evalSimStats_meanCI.csv', 'interUeDistance', 'avgFlowMeanDelay', 'nUEs', campaignPrefix)
+# plot_with_error_bars('z_20_nUes-All_evalSimStats_meanCI.csv', 'interUeDistance', 'avgFlowLossRatio', 'nUEs', campaignPrefix)
+# plot_with_error_bars('z_20_nUes-All_evalSimStats_meanCI.csv', 'nUEs', 'avgFlowMeanDelay', 'interUeDistance', campaignPrefix)
+# plot_with_error_bars('z_20_nUes-All_evalSimStats_meanCI.csv', 'nUEs', 'avgFlowLossRatio', 'interUeDistance', campaignPrefix)
+# plot_with_error_bars('z_20_nUes-All_evalSimPhyStatsGlobal_meanCI.csv', 'interUeDistance', 'nHdRxData', 'nUEs', campaignPrefix)
+# plot_with_error_bars('z_20_nUes-All_evalSimPhyStatsGlobal_meanCI.csv', 'interUeDistance', 'nCorruptRxData', 'nUEs', campaignPrefix)
+# plot_with_error_bars('z_20_nUes-All_evalSimPhyStatsGlobal_meanCI.csv', 'interUeDistance', 'nIgnoredData', 'nUEs', campaignPrefix)
+
 
 end_time = time.time()
 duration_s = end_time - start_time

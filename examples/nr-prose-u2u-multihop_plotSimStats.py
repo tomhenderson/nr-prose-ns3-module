@@ -7,6 +7,7 @@ from collections import defaultdict
 import argparse
 from math import cos, sin, radians
 import numpy as np
+import pandas as pd
 
 def plot_nodes_and_paths(filename, simOutputPath):
     
@@ -368,6 +369,176 @@ def plot_phy_stats_bars(filename, simOutputPath):
     plt.close()  # Close the plot
 
 
+def plot_phy_stats_perNode_ctrl(filename, simOutputPath):
+    # Load data
+    csv_file = f"{simOutputPath}/{filename}"
+    df = pd.read_csv(csv_file)
+    
+    # Define control metrics
+    ctrl_metrics = ['nRxCtrl', 'nCorruptRxCtrl', 'nHdRxCtrl']
+    
+    # Create subplot for control metrics
+    fig, ax_ctrl = plt.subplots(figsize=(12, 7))
+
+    # Plotting control metrics
+    df.set_index('NodeID')[ctrl_metrics].plot(kind='bar', stacked=True, ax=ax_ctrl, position=1, width=0.4)
+    df.set_index('NodeID')[['nTxCtrl']].plot(kind='bar', ax=ax_ctrl, position=0, width=0.4, color='gray')
+    ax_ctrl.set_xlabel('NodeID')
+    ax_ctrl.set_ylabel('Control Metrics Values')
+    ax_ctrl.set_title('Control Metrics per NodeID')
+    
+    # Adjust layout
+    plt.tight_layout()
+    
+    # Save the plot
+    plot_file_path = f"{simOutputPath}/simPhyStats_perNode_Ctrl.png"
+    plt.savefig(plot_file_path)
+    plt.close()
+
+def plot_phy_stats_perNode_data(filename, simOutputPath, zoom_percent=10):
+    # Load data
+    csv_file = f"{simOutputPath}/{filename}"
+    df = pd.read_csv(csv_file)
+    
+    # Define data metrics
+    data_metrics = ['nRxData', 'nCorruptRxData', 'nHdRxData', 'nIgnoredData']
+    
+    # Get the nTxData value for Node 0
+    nTxData_node0 = df[df['NodeID'] == 0]['nTxData'].values[0]
+    
+    # Create subplots
+    fig, (ax_data, ax_zoom) = plt.subplots(2, 1, figsize=(10, 10))
+
+    # Plotting data metrics
+    df.set_index('NodeID')[data_metrics].plot(kind='bar', stacked=True, ax=ax_data, position=1, width=0.4)
+    df.set_index('NodeID')[['nTxData']].plot(kind='bar', ax=ax_data, position=0, width=0.4, color='gray')
+    ax_data.set_xlabel('NodeID')
+    ax_data.set_ylabel('Number of Packets')
+    ax_data.set_title('PHY statistics per NodeID. \nPercentage is nRxData (relative to Node ID 0 nTxData)')
+    
+    # Annotate nRxData with percentages relative to nTxData of Node 0
+    for idx, row in df.iterrows():
+        node_id = row['NodeID']
+        if node_id != 0:
+            nRxData_value = row['nRxData']
+            percentage = (nRxData_value / nTxData_node0) * 100
+            ax_data.text(node_id, nRxData_value / 2, f'{percentage:.1f}%', ha='center', va='center', color='black')
+    
+    # Zoomed-in plot
+    df.set_index('NodeID')[data_metrics].plot(kind='bar', stacked=True, ax=ax_zoom, position=1, width=0.4)
+    df.set_index('NodeID')[['nTxData']].plot(kind='bar', ax=ax_zoom, position=0, width=0.4, color='gray')
+    ax_zoom.set_xlabel('NodeID')
+    ax_zoom.set_ylabel('Number of Packets')
+    
+    # Calculate the top X% threshold for the Y-axis
+    y_max = 1.02*(df[data_metrics].values.max())
+    top_X_percent = y_max * zoom_percent/100.0
+    ax_zoom.set_ylim(y_max - top_X_percent, y_max)
+    ax_zoom.set_title('PHY statistics per NodeID. Zoom top '+f'{zoom_percent:.1f}%'+'.\nPercentage is nHdRxData (relative to Node ID 0 nTxData)')
+
+    # Annotate nHdRxData with percentages relative to nTxData of Node 0
+    for idx, row in df.iterrows():
+        node_id = row['NodeID']
+        if node_id != 0:
+            nHdRxData_value = row['nHdRxData']
+            nRxData_value = row['nRxData']
+            nCorruptRxData_value = row['nCorruptRxData']
+            nHdRxDataPercentage = (nHdRxData_value / nTxData_node0) * 100
+            ax_zoom.text(node_id, (nHdRxData_value / 2 + nRxData_value + nCorruptRxData_value), f'{nHdRxDataPercentage:.1f}%', ha='right', va='center', color='black')
+        
+    # Adjust layout
+    plt.tight_layout()
+    
+    # Save the plot
+    plot_file_path = f"{simOutputPath}/simPhyStats_perNode_Data.png"
+    plt.savefig(plot_file_path)
+    plt.close()
+
+
+def plot_phy_stats_perNode_data_total(filename, simOutputPath):
+    # Load data
+    csv_file = f"{simOutputPath}/{filename}"
+    df = pd.read_csv(csv_file)
+    
+    # Get the RngSeed and RngRun values from the first row
+    rng_seed = df.iloc[0]['RngSeed']
+    rng_run = df.iloc[0]['RngRun']
+
+    # Get the nTxData value for the first node (first row)
+    nTxData_first_node = df.iloc[0]['nTxData']    
+
+    # Get the Node ID for the last node (last row)
+    last_node_id = df.iloc[-1]['NodeID']
+
+    # Calculate the sums for the last node and total sums for the other metrics
+    nRxData_last_node = df.iloc[-1]['nRxData']
+    nCorruptRxData_sum = df['nCorruptRxData'].sum()
+    nHdRxData_sum = df['nHdRxData'].sum()
+    nIgnoredData_sum = df['nIgnoredData'].sum()
+    
+    # Calculate percentages
+    nRxData_percent = (nRxData_last_node / nTxData_first_node) * 100
+    nCorruptRxData_percent = (nCorruptRxData_sum / nTxData_first_node) * 100
+    nHdRxData_percent = (nHdRxData_sum / nTxData_first_node) * 100
+    nIgnoredData_percent = (nIgnoredData_sum / nTxData_first_node) * 100
+    
+    # Create a DataFrame for the plot
+    data = {
+        'Metrics': ['Node 0 nTxData', 'Rx Metrics'],
+        'Values': [nTxData_first_node, nRxData_last_node + nCorruptRxData_sum + nHdRxData_sum + nIgnoredData_sum],
+        'nRxData': [0, nRxData_last_node],
+        'nCorruptRxData': [0, nCorruptRxData_sum],
+        'nHdRxData': [0, nHdRxData_sum],
+        'nIgnoredData': [0, nIgnoredData_sum]
+    }
+    plot_df = pd.DataFrame(data).set_index('Metrics')
+
+    # Create the plot
+    fig, ax_data = plt.subplots(figsize=(7,4))
+
+    # Plotting the data metrics
+    plot_df[['Values']].plot(kind='bar', stacked=True, ax=ax_data, width=0.6, color=['gray'], legend=False)
+    plot_df[['nRxData', 'nCorruptRxData', 'nHdRxData', 'nIgnoredData']].plot(kind='bar', stacked=True, ax=ax_data, width=0.6)
+    ax_data.set_ylabel('Number of packets')
+    ax_data.set_xlabel(' ')
+    ax_data.set_title('PHY statistics global view')
+    ax_data.set_xticklabels(ax_data.get_xticklabels(), rotation=0)
+
+    # Add legend with percentages
+    handles, labels = ax_data.get_legend_handles_labels()
+    labels = [
+        f'Node 0 nTxData (100%)',
+        f'Node {last_node_id} nRxData ({nRxData_percent:.1f}%)',
+        f'Sum all nodes nCorruptRxData ({nCorruptRxData_percent:.1f}%)',
+        f'Sum all nodes nHdRxData ({nHdRxData_percent:.1f}%)',
+        f'Sum all nodes nIgnoredData ({nIgnoredData_percent:.1f}%)'
+    ]
+    ax_data.legend(handles, labels, loc='center left', bbox_to_anchor=(1, 0.5))
+    
+    # Adjust layout
+    plt.tight_layout()
+    
+    # Save the plot
+    plot_file_path = f"{simOutputPath}/simPhyStats_perNode_Data_total.png"
+    plt.savefig(plot_file_path)
+    plt.close()
+
+    # Save the percentage values to a CSV file
+    output_file_path = f"{simOutputPath}/simPhyStats_PerNode_Data_total.csv"
+    percentage_data = {
+        'RngSeed': [rng_seed],
+        'RngRun': [rng_run],
+        'nTxData': [100],
+        'nRxData': [nRxData_percent],
+        'nCorruptRxData': [nCorruptRxData_percent],
+        'nHdRxData': [nHdRxData_percent],
+        'nIgnoredData': [nIgnoredData_percent]
+    }
+    percentage_df = pd.DataFrame(percentage_data)
+    percentage_df.to_csv(output_file_path, index=False)
+
+
+
 #####################################################################################
 ################################# Main script #######################################
 #####################################################################################
@@ -391,4 +562,7 @@ plot_nodes_and_paths('nodes_and_paths.csv', simOutputPath)
 plot_flow_statistics('flowsStats.csv', simOutputPath)
 plot_statistics_per_hops('flowsStats.csv', simOutputPath)
 plot_phy_stats_bars ('simPhyStats.csv', simOutputPath)
+plot_phy_stats_perNode_ctrl('simPhyStats_perNode.csv', simOutputPath)
+plot_phy_stats_perNode_data('simPhyStats_perNode.csv', simOutputPath)
+plot_phy_stats_perNode_data_total('simPhyStats_perNode.csv', simOutputPath)
 
