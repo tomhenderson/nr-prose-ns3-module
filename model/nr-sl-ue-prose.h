@@ -480,6 +480,13 @@ class NrSlUeProse : public NrSlUeService
                              SidelinkInfo slInfo,
                              Ipv4Address myIp);
 
+    /**
+     * Instruct lower layer to remove Rx radio bearer
+     * \param srcL2Id the source L2 ID
+     * \param dstL2Id the destination L2 ID
+     */
+    void RemoveSlRxRadioBearer (uint32_t srcL2Id, uint32_t dstL2Id);
+
   private:
     // NrSlUeSvcRrcSapUser methods
     void DoReceiveNrSlSignalling(Ptr<Packet> packet, uint32_t srcL2Id);

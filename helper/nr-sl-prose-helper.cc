@@ -520,32 +520,28 @@ NrSlProseHelper::ConfigureU2uRelayPath(Ipv4Address srcIp,
     // Configure src->tgt path
     for (std::list<Ptr<NetDevice>>::iterator it = ueDevPath.begin(); it != ueDevPath.end(); it++)
     {
+        Ptr<NrSlUeProse> ueProse = (*it)->GetObject<NrUeNetDevice>()->GetObject<NrSlUeProse>();
         if (it != std::prev(ueDevPath.end()))
         {
-            Ptr<NrSlUeProse> ueProse = (*it)->GetObject<NrUeNetDevice>()->GetObject<NrSlUeProse>();
             uint32_t nextHopL2Id =
                 (*std::next(it))->GetObject<NrUeNetDevice>()->GetObject<NrSlUeProse>()->GetL2Id();
             Ipv4Address ueIp =
                 (*it)->GetNode()->GetObject<Ipv4L3Protocol>()->GetAddress(1, 0).GetLocal();
             ueProse->ConfigureU2uNexthop(tgtIp, tgtPort, nextHopL2Id, slInfo, ueIp);
         }
-    }
 
-    // Configure tft->src path
-    for (std::list<Ptr<NetDevice>>::reverse_iterator rit = ueDevPath.rbegin();
-         rit != ueDevPath.rend();
-         rit++)
-    {
-        if (rit != std::prev(ueDevPath.rend()))
+        //Remove previous Rx bearers to avoid problems with obsolete info in lower layers
+        if (it != ueDevPath.begin())
         {
-            Ptr<NrSlUeProse> ueProse = (*rit)->GetObject<NrUeNetDevice>()->GetObject<NrSlUeProse>();
-            uint32_t nextHopL2Id =
-                (*std::next(rit))->GetObject<NrUeNetDevice>()->GetObject<NrSlUeProse>()->GetL2Id();
-            Ipv4Address ueIp =
-                (*rit)->GetNode()->GetObject<Ipv4L3Protocol>()->GetAddress(1, 0).GetLocal();
-            ueProse->ConfigureU2uNexthop(srcIp, tgtPort, nextHopL2Id, slInfo, ueIp);
+            uint32_t prevHopL2Id =
+                (*std::prev(it))->GetObject<NrUeNetDevice>()->GetObject<NrSlUeProse>()->GetL2Id();
+            uint32_t thisUeL2Id =
+                (*it)->GetObject<NrUeNetDevice>()->GetObject<NrSlUeProse>()->GetL2Id();
+
+            ueProse->RemoveSlRxRadioBearer (prevHopL2Id, thisUeL2Id);
         }
     }
+
 }
 
 } // namespace ns3

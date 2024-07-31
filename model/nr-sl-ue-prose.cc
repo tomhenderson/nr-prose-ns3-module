@@ -1396,4 +1396,17 @@ NrSlUeProse::ConfigureU2uNexthop(Ipv4Address tgtIp,
                                                                         slInfoNew);
 }
 
+void
+NrSlUeProse::RemoveSlRxRadioBearer (uint32_t srcL2Id, uint32_t dstL2Id)
+{
+    NS_LOG_FUNCTION(this << srcL2Id << dstL2Id);
+
+    // Reusing this function to notify the RRC to delete the Rx sidelink data bearer.
+    m_nrSlUeSvcRrcSapProvider->NotifySidelinkConnectionRelease(
+        srcL2Id,
+        dstL2Id,
+        std::numeric_limits<uint8_t>::max());
+}
+
+
 } // namespace ns3
