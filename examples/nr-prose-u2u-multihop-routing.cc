@@ -47,7 +47,6 @@ $ ./ns3 run "nr-prose-u2u-multihop-routing --help"
  */
 
 #include "ns3/core-module.h"
-#include "ns3/config-store.h"
 #include "ns3/network-module.h"
 #include "ns3/internet-module.h"
 #include "ns3/applications-module.h"
@@ -232,12 +231,12 @@ double g_d = 0;
 
 struct TrafficStats
 {
-  uint32_t nRxPkts;
-  uint32_t nTxPkts;
-  double lossRatio;
-  double meanDelay;
-  double meanJitter;
-  double throughput; 
+  uint32_t nRxPkts=0;
+  uint32_t nTxPkts=0;
+  double lossRatio=std::numeric_limits<double>::quiet_NaN();
+  double meanDelay=std::numeric_limits<double>::quiet_NaN();
+  double meanJitter=std::numeric_limits<double>::quiet_NaN();
+  double throughput=std::numeric_limits<double>::quiet_NaN();
 };
 
 /*
@@ -255,6 +254,7 @@ struct FlowInfo
   uint16_t minNHops = std::numeric_limits<uint16_t>::max();
   uint16_t maxNHops = 0;
   uint16_t nRouteChanges = 0;
+  uint16_t nDisruptions = 0;
   SidelinkInfo slInfo;
   TrafficStats trafficStats; //To be filled at the end of the simulation
 };
@@ -328,19 +328,54 @@ Ipv4Address GetIpFromNodeId(uint32_t nodeId, NodeContainer nodes) {
     return Ipv4Address("0.0.0.0"); // Return a default "invalid" address if no node is found or no interface is set up
 }
 
+void PrintRoutingTables (NodeContainer ueNodes, uint32_t nodeId=255)
+{
+    Ptr<OutputStreamWrapper> routingTableStream = Create<OutputStreamWrapper>(&std::cout);
+
+    *routingTableStream->GetStream () << "******************************" << "Simulation time (s): " << Simulator::Now().GetSeconds ()<<  "******************************" << std::endl;
+    for ( uint32_t k = 0; k < ueNodes.GetN(); k ++ )
+    {
+        Ptr <ns3::Ipv4> ipv4 =  ueNodes.Get(k)->GetObject <ns3::Ipv4> ();
+        if (!ipv4)
+        {
+          *routingTableStream->GetStream ()  << "Node " << ueNodes.Get(k)->GetId () << " Does not have an Ipv4 object";
+          return;
+        }
+        if (ueNodes.Get(k)->GetId () == nodeId || nodeId == 255)
+        {
+          ipv4->GetRoutingProtocol ()->PrintRoutingTable (routingTableStream);
+        }
+    }
+    *routingTableStream->GetStream () <<  "**********************************************************************************************" << std::endl;
+}
+
+
+//Global variable used to count routing info only after traffic
+Time g_startTrafficTime;
 
 void
-TraceRoute (Ptr<NrSlProseHelper> nrSlProseHelper, FlowInfo& flowInfo, NodeContainer ueNodes, Ptr<OutputStreamWrapper> trace, Time interval, std::string prevPath) {
+CheckRoute (Ptr<NrSlProseHelper> nrSlProseHelper, FlowInfo& flowInfo, NodeContainer ueNodes, Ptr<OutputStreamWrapper> trace, Time interval, std::string prevPath) {
    
     std::vector<uint32_t> path;
-    
+    std::set<uint32_t> visitedNodes; // To keep track of visited nodes for loop detection
+    bool loop = false;
+
     uint32_t currentNodeId = flowInfo.srcNodeId;
     Ipv4Address srcIp = GetIpFromNodeId (flowInfo.srcNodeId, ueNodes);
     Ipv4Address tgtIp = GetIpFromNodeId (flowInfo.tgtNodeId, ueNodes);
-    *trace->GetStream()<< std::fixed << std::setprecision(3)  << Simulator::Now().GetSeconds() << "," << srcIp << "," << flowInfo.srcNodeId << "," << tgtIp << "," << flowInfo.tgtNodeId << ",";
+//    *trace->GetStream()<< std::fixed << std::setprecision(3)  << Simulator::Now().GetSeconds() << "," << srcIp << "," << flowInfo.srcNodeId << "," << tgtIp << "," << flowInfo.tgtNodeId << ",";
 
     while (currentNodeId != flowInfo.tgtNodeId) {
+        if (visitedNodes.find(currentNodeId) != visitedNodes.end())
+        {
+            //Loop
+            loop = true;
+            path.clear();
+            break;
+        }
         path.push_back(currentNodeId);
+        visitedNodes.insert(currentNodeId);
+
         Ptr<Node> currentNode = ueNodes.Get(currentNodeId);
         Ptr<Ipv4> ipv4 = currentNode->GetObject<Ipv4>();
         Ipv4Header ipv4Header;
@@ -378,27 +413,47 @@ TraceRoute (Ptr<NrSlProseHelper> nrSlProseHelper, FlowInfo& flowInfo, NodeContai
             currPath  << path[i];
         }
     } else {
-        currPath << "nan";
+        if (loop)
+        {
+           currPath << "loop";
+        }
+        else
+        {
+          currPath << "nan";
+        }
+    }
+    
+    //Log the latest info on the number of hops  just before traffic starts
+    if ((Simulator::Now() > (g_startTrafficTime - Seconds(1)) && Simulator::Now() < g_startTrafficTime) )
+    {
+      if (!path.empty())
+      {
+        flowInfo.minNHops = path.size () -1;
+        flowInfo.maxNHops = path.size () -1;
+      }
     }
 
-    *trace->GetStream() << currPath.str () << std::endl;
-    
     //Check if the path changed
     if (!path.empty() && currPath.str () != prevPath)
     {
       std::cout << "Flow " << flowInfo.id << " changed route, previous: " << prevPath << ", new: " << currPath.str () <<std::endl;
+      *trace->GetStream()<< std::fixed << std::setprecision(3)  << Simulator::Now().GetSeconds() << "," << srcIp << "," << flowInfo.srcNodeId << "," << tgtIp << "," << flowInfo.tgtNodeId << ","<< currPath.str () << std::endl;
+
+      PrintRoutingTables (ueNodes);
       
       //Update flow info data
-      flowInfo.nRouteChanges ++;
-      if (path.size () -1 <= flowInfo.minNHops )
-        {
-          flowInfo.minNHops = path.size () -1;
-        }
-        if (path.size () -1 >= flowInfo.maxNHops)
-        {
-          flowInfo.maxNHops = path.size () -1;
-        }
-
+      if (Simulator::Now() > g_startTrafficTime)
+      {
+        flowInfo.nRouteChanges ++;
+        if (path.size () -1 <= flowInfo.minNHops )
+          {
+            flowInfo.minNHops = path.size () -1;
+          }
+          if (path.size () -1 >= flowInfo.maxNHops)
+          {
+            flowInfo.maxNHops = path.size () -1;
+          }
+      }
       //Configure new route
       //Clear old dev path
       flowInfo.ueDevPath.clear ();
@@ -411,34 +466,122 @@ TraceRoute (Ptr<NrSlProseHelper> nrSlProseHelper, FlowInfo& flowInfo, NodeContai
       }
       
       //Call the helper
-      nrSlProseHelper->ConfigureU2uRelayPath (flowInfo.srcIp , flowInfo.tgtIp, flowInfo.tgtPort,flowInfo.slInfo, flowInfo.ueDevPath);
+      nrSlProseHelper->ConfigureU2uRelayPath (flowInfo.srcIp , flowInfo.tgtIp, flowInfo.tgtPort, flowInfo.slInfo, flowInfo.ueDevPath);
     }
 
-    Simulator::Schedule(interval, &TraceRoute, nrSlProseHelper, std::ref(flowInfo), ueNodes, trace, interval, currPath.str ()); //Call it with prevPath = currPath
+    Simulator::Schedule(interval, &CheckRoute, nrSlProseHelper, std::ref(flowInfo), ueNodes, trace, interval, currPath.str ()); //Call it with prevPath = currPath
 
 }
 
+/*
+* TODO
+*/
+uint32_t GetRandomNodeId (ns3::NodeContainer& nodes, Ptr<ns3::UniformRandomVariable> randomVariable) {
 
-void PrintRoutingTables (NodeContainer ueNodes, uint32_t nodeId=255)
-{ 
-    Ptr<OutputStreamWrapper> routingTableStream = Create<OutputStreamWrapper>(&std::cout);
-    
-    *routingTableStream->GetStream () << "******************************" << "Simulation time (s): " << Simulator::Now().GetSeconds ()<<  "******************************" << std::endl;
-    for ( uint32_t k = 0; k < ueNodes.GetN(); k ++ )
+  uint32_t randomIndex = randomVariable->GetInteger(0, nodes.GetN() - 1);
+
+  return nodes.Get(randomIndex)->GetId();
+}
+
+
+/*
+ * Global variables to count TX/RX routing packets .
+ */
+uint32_t rxRoutingByteCounter = 0;
+uint32_t txRoutingByteCounter = 0;
+uint32_t rxRoutingPktCounter = 0;
+uint32_t txRoutingPktCounter = 0;
+
+void TxRoutingPacketOlsr(const ns3::olsr::PacketHeader &header, const ns3::olsr::MessageList &messages)
+{
+  if (Simulator::Now() > g_startTrafficTime)
+  {
+    txRoutingPktCounter ++;
+    txRoutingByteCounter += header.GetPacketLength();
+  }
+/*  std::cout <<Simulator::Now().GetSeconds ()  << " OLSR TX - Header:  Seq " << header.GetPacketSequenceNumber() << " Len " << header.GetPacketLength() << " serialized size " << header.GetSerializedSize () << std::endl;
+  for (const auto &message : messages) {
+      std::cout << "Message - Type: " << message.GetMessageType () << " Seq " << message.GetMessageSequenceNumber ()
+                << " Originator " <<  message.GetOriginatorAddress() << " Hop count " << +message.GetHopCount () << " serialized size " << message.GetSerializedSize () <<  std::endl;
+  }*/
+}
+
+void RxRoutingPacketOlsr(const ns3::olsr::PacketHeader &header, const ns3::olsr::MessageList &messages)
+{
+  if (Simulator::Now() > g_startTrafficTime)
+  {
+    rxRoutingPktCounter ++;
+    rxRoutingByteCounter += header.GetPacketLength();
+  }
+/*    std::cout <<Simulator::Now().GetSeconds ()  << " OLSR RX - Header:  Seq " << header.GetPacketSequenceNumber() << " Len " << header.GetPacketLength() << std::endl;
+  for (const auto &message : messages) {
+      std::cout << "Message - Type: " << message.GetMessageType () << " Seq " << message.GetMessageSequenceNumber ()
+                << " Originator " <<  message.GetOriginatorAddress() << " Hop count " << +message.GetHopCount () <<   std::endl;
+  } */
+}
+
+
+void TxRoutingPacketBatman(std::string nodeId, const ns3::batmand::OGMHeader &header, const ns3::batmand::MessageList &messages)
+{
+  if (Simulator::Now() > g_startTrafficTime)
+  {
+    txRoutingPktCounter ++;
+  }
+  //txRoutingByteCounter += header.GetPacketLength(); //The header is not having the correct lenght....
+
+/* std::cout <<Simulator::Now().GetSeconds ()  << " " << nodeId << " BATMAN TX - Header -"
+          << " Len: " << header.GetPacketLength ()  << " Seq: " << +header.GetPacketSequenceNumber ()
+          <<  " Originator: " << header.GetOriginatorAddress() << " Forwarder: " << header.GetForwarderAddress ()
+          << " Dir link: " << +header.HasDirectLinkFlag ()
+          << " Uni: " << +header.HasUnidirectionalLinkFlag ()
+          << " TTL: " << +header.GetTtl ()<< " TQ: " << +header.GetTQvalue()
+          << " [N messages: " << messages.size ()   <<"]" <<   std::endl; */
+  for (const auto &message : messages) {
+      /* std::cout << "\t\t\t\t\t\t\t\t\t\t Message - Len: " << message.GetPacketLength ()  << " Seq: " << +message.GetPacketSequenceNumber ()
+                << " Originator: " << message.GetOriginatorAddress()
+                << " Forwarder: " << message.GetForwarderAddress ()
+                << " Dir link: " << +message.HasDirectLinkFlag ()
+                << " Uni: " << +message.HasUnidirectionalLinkFlag ()
+                << " TTL: " << +message.GetTtl ()
+                << " TQ: " << +message.GetTQvalue()
+                << std::endl; */
+    if (Simulator::Now() > g_startTrafficTime)
     {
-        Ptr <ns3::Ipv4> ipv4 =  ueNodes.Get(k)->GetObject <ns3::Ipv4> ();
-          if (!ipv4)
-        {
-          *routingTableStream->GetStream ()  << "Node " << ueNodes.Get(k)->GetId () << " Does not have an Ipv4 object";
-          return;
-        }
-        
-        if (ueNodes.Get(k)->GetId () == nodeId || nodeId == 255)
-        {
-          ipv4->GetRoutingProtocol ()->PrintRoutingTable (routingTableStream);
-        }
+      txRoutingByteCounter += message.GetPacketLength ();
     }
-    *routingTableStream->GetStream () <<  "**********************************************************************************************" << std::endl;
+  }
+}
+
+void RxRoutingPacketBatman(std::string nodeId, const ns3::batmand::OGMHeader &header, const ns3::batmand::MessageList &messages)
+{
+  if (Simulator::Now() > g_startTrafficTime)
+  {
+    rxRoutingPktCounter ++;
+  }
+  //rxRoutingByteCounter += header.GetPacketLength(); //The header is not having the correct lenght....
+
+  /* std::cout <<Simulator::Now().GetSeconds ()  << " " << nodeId  << " BATMAN RX - Header -"
+          << " Len: " << header.GetPacketLength ()  << " Seq: " << +header.GetPacketSequenceNumber ()
+           <<  " Originator: " << header.GetOriginatorAddress() << " Forwarder: " << header.GetForwarderAddress ()
+           << " Dir link: " << +header.HasDirectLinkFlag ()
+          << " Uni: " << +header.HasUnidirectionalLinkFlag ()
+          << " TTL: " << +header.GetTtl ()<< " TQ: " << +header.GetTQvalue()
+          << " [N messages: " << messages.size ()   <<"]" <<   std::endl; */
+  for (const auto &message : messages) {
+      /* std::cout << "\t\t\t\t\t\t\t\t\t\t Message - Len: " << message.GetPacketLength ()  << " Seq: " << +message.GetPacketSequenceNumber ()
+                << " Originator: " << message.GetOriginatorAddress()
+                << " Forwarder: " << message.GetForwarderAddress ()
+                << " Dir link: " << +message.HasDirectLinkFlag ()
+                << " Uni: " << +message.HasUnidirectionalLinkFlag ()
+                << " TTL: " << +message.GetTtl ()
+                << " TQ: " << +message.GetTQvalue()
+                << std::endl; */
+
+    if (Simulator::Now() > g_startTrafficTime)
+    {
+      rxRoutingByteCounter += message.GetPacketLength ();
+    }
+  }
 }
 
 void SetNodeTxPower(uint32_t nodeId, NodeContainer& nodes, double newTxPower) {
@@ -463,141 +606,191 @@ void SetNodeTxPower(uint32_t nodeId, NodeContainer& nodes, double newTxPower) {
 }
 
 void
-ConfigureStaticRoute (Ptr<NrSlProseHelper> nrSlProseHelper, FlowInfo& flowInfo, NodeContainer ueNodes, SidelinkInfo slInfo, uint16_t tgtPort )
+CreateDisruption (FlowInfo& flowInfo, NodeContainer ueNodes)
 {
-  
-    //The same than Trace Route but creating the UeDevPath at the same time
-    uint32_t currentNodeId = flowInfo.srcNodeId;
-    while (currentNodeId != flowInfo.tgtNodeId) {
-      
-        Ptr<Node> currentNode = ueNodes.Get(currentNodeId);
-        Ptr<NrUeNetDevice> netDevPtr = currentNode->GetDevice (0)->GetObject<NrUeNetDevice> ();
-        flowInfo.ueDevPath.push_back (netDevPtr);
+  if (!flowInfo.ueDevPath.empty () && flowInfo.ueDevPath.size () > 2)
+  {
 
-        Ptr<Ipv4> ipv4 = currentNode->GetObject<Ipv4>();
-        Ipv4Header ipv4Header;
-        ipv4Header.SetDestination(flowInfo.tgtIp);
-
-        Socket::SocketErrno se;
-        Ptr<Ipv4Route> route = ipv4->GetRoutingProtocol()->RouteOutput(Ptr<Packet>(), ipv4Header, nullptr, se);
-
-        if (route == nullptr) {
-            flowInfo.ueDevPath.clear(); // Clear the path as no valid route was found
-            break;
-        }
-
-        Ipv4Address nextHopIp = route->GetGateway();
-        uint32_t nextNodeId = GetNodeIdFromIp(nextHopIp, ueNodes);
-
-        if (nextNodeId == 255) {
-            flowInfo.ueDevPath.clear(); // Clear the path as there was an error finding the next node
-            break;
-        }
-
-        currentNodeId = nextNodeId;
-    }
-
-    if (!flowInfo.ueDevPath.empty() && currentNodeId == flowInfo.tgtNodeId) 
+    //Get path string
+    std::ostringstream currPath;
+    uint16_t index = 0;
+    for (Ptr<NetDevice> netDevice : flowInfo.ueDevPath)
     {
-
-        Ptr<Node> targetNode = ueNodes.Get(flowInfo.tgtNodeId);
-        Ptr<NrUeNetDevice> netDevPtr = targetNode->GetDevice (0)->GetObject<NrUeNetDevice> ();
-        flowInfo.ueDevPath.push_back (netDevPtr);
-        if (flowInfo.ueDevPath.size () -1 <= flowInfo.minNHops )
-        {
-          flowInfo.minNHops = flowInfo.ueDevPath.size () -1;
-        }
-        if (flowInfo.ueDevPath.size () -1 >= flowInfo.maxNHops)
-        {
-          flowInfo.maxNHops = flowInfo.ueDevPath.size () -1;
-
-        }
-
-        for (auto it = flowInfo.ueDevPath.begin (); it != flowInfo.ueDevPath.end (); ++it)
-        {
-            std::cout << ns3::DynamicCast<ns3::NrUeNetDevice>(*it) ->GetImsi() <<std::endl;
-        }
-
-    if (true)
+      if (index > 0)
       {
-        nrSlProseHelper->ConfigureU2uRelayPath (flowInfo.srcIp , flowInfo.tgtIp, tgtPort, slInfo, flowInfo.ueDevPath);
+          currPath  << "->";
       }
-
+      currPath  << netDevice->GetNode ()->GetId ();
+      index++;
     }
+    //Get middle node ID
+    uint32_t devIdx =  std::ceil (flowInfo.ueDevPath.size () / 2.0);
+    std::list<Ptr<NetDevice>>::iterator it = flowInfo.ueDevPath.begin();
+    std::advance(it, (devIdx-1));
+    uint32_t nodeId =  (*it)->GetNode()->GetId();
+
+    std::cout << Simulator::Now ().GetSeconds () << "Creating disruption for flow " << flowInfo.id 
+              << ". Current path: " << currPath.str () << ", Node ID to disturb: " << nodeId << std::endl;
+    flowInfo.nDisruptions ++;
+    //Set Tx power to zero
+    SetNodeTxPower(nodeId, ueNodes, 0);
+  }
+  else
+  {
+    std::cout << Simulator::Now ().GetSeconds () << "Unable to create disruption for flow " << flowInfo.id 
+              << ". Current path size: " << flowInfo.ueDevPath.size () << std::endl;
+  }
+}
+
+uint32_t nGrantDrops = 0;
+void TraceGrantDrops (std::string nodeId, uint64_t imsi, uint16_t rnti, uint32_t dstL2Id, uint8_t lcid, uint32_t bytes)
+{
+  //std::cout << Now ().GetSeconds () << " Grant drop nodeId "<< nodeId << " IMSI " << imsi << " dstL2Id " << dstL2Id << " lcid " << +lcid << std::endl;
+  nGrantDrops ++;
+}
+
+
+class NodePhyStats {
+public:
+  struct PhyStats {
+      uint64_t nTxCtrl = 0;         // PSCCH
+      uint64_t nTxData = 0;         // PSSCH
+      uint64_t nRxCtrl = 0;         // Successfully decoded PSCCH
+      uint64_t nRxData = 0;         // Successfully decoded PSSCH
+      uint64_t nCorruptRxCtrl = 0;  // PSCCH corrupted (BLER)
+      uint64_t nCorruptRxData = 0;  // PSSCH corrupted (BLER)
+      uint64_t nHdRxCtrl = 0;       // PSCCH ignored due to half duplex
+      uint64_t nHdRxData = 0;       // PSSCH ignored due to half duplex
+      uint64_t nIgnoredData = 0;    // Not expected (PSCCH not received)
+  };
+
+  uint32_t m_nodeId;
+  uint32_t m_l2Id;
+
+  PhyStats m_stats;
+};
+
+/*
+* TODO
+*/
+// void
+// TraceSlPscchTx (NodePhyStats *stats, const Time duration)
+// {
+//   if (Simulator::Now() > g_startTrafficTime)
+//   {
+//     stats->m_stats.nTxCtrl ++;
+//   }
+// }
+void
+TraceSlPscchTx (NodePhyStats *stats, const uint64_t dstL2Id)
+{
+  if (Simulator::Now() > g_startTrafficTime && dstL2Id != 255) //Do not trace broadcast transmissions
+  {
+    stats->m_stats.nTxCtrl ++;
+  }
 }
 
 /*
 * TODO
 */
-uint32_t GetRandomNodeId (ns3::NodeContainer& nodes, Ptr<ns3::UniformRandomVariable> randomVariable) {
-
-  uint32_t randomIndex = randomVariable->GetInteger(0, nodes.GetN() - 1);
-
-  return nodes.Get(randomIndex)->GetId();
+// void
+// TraceSlPsschTx (NodePhyStats *stats, const Time duration)
+// {
+//   if (Simulator::Now() > g_startTrafficTime)
+//   {
+//     stats->m_stats.nTxData ++;
+//   }
+// }
+void
+TraceSlPsschTx (NodePhyStats *stats, const uint64_t dstL2Id)
+{
+  if (Simulator::Now() > g_startTrafficTime && dstL2Id != 255) //Do not trace broadcast transmissions
+  {
+    stats->m_stats.nTxData ++;
+  }
 }
 
 
 /*
- * Global variables to count TX/RX routing packets .
- */
-uint32_t rxRoutingByteCounter = 0;
-uint32_t txRoutingByteCounter = 0;
-uint32_t rxRoutingPktCounter = 0;
-uint32_t txRoutingPktCounter = 0;
-
-void TxRoutingPacketOlsr(const ns3::olsr::PacketHeader &header, const ns3::olsr::MessageList &messages) 
+* TODO
+*/
+void
+TraceSlPscchRx (NodePhyStats *stats, const SlRxCtrlPacketTraceParams pscchStatsParams)
 {
-  txRoutingPktCounter ++;
-  txRoutingByteCounter += header.GetPacketLength(); 
-/*  std::cout <<Simulator::Now().GetSeconds ()  << " OLSR TX - Header:  Seq " << header.GetPacketSequenceNumber() << " Len " << header.GetPacketLength() << " serialized size " << header.GetSerializedSize () << std::endl;
-  for (const auto &message : messages) {
-      std::cout << "Message - Type: " << message.GetMessageType () << " Seq " << message.GetMessageSequenceNumber () 
-                << " Originator " <<  message.GetOriginatorAddress() << " Hop count " << +message.GetHopCount () << " serialized size " << message.GetSerializedSize () <<  std::endl;
-  }*/ 
+  if (Simulator::Now() > g_startTrafficTime)
+  {
+    //Only collect stats for traffic direceted to this UE
+    if (pscchStatsParams.m_dstL2Id == stats->m_l2Id)
+    {
+      if (pscchStatsParams.m_corrupt)
+      {
+          stats->m_stats.nCorruptRxCtrl ++;
+      }
+      else
+      {
+        stats->m_stats.nRxCtrl ++;
+      }
+    }
+  }
+
 }
 
-void RxRoutingPacketOlsr(const ns3::olsr::PacketHeader &header, const ns3::olsr::MessageList &messages) 
+/*
+* TODO
+*/
+void
+TraceSlPsschRx (NodePhyStats *stats, const SlRxDataPacketTraceParams psschStatsParams)
 {
-  rxRoutingPktCounter ++;
-  rxRoutingByteCounter += header.GetPacketLength();
-
-/*    std::cout <<Simulator::Now().GetSeconds ()  << " OLSR RX - Header:  Seq " << header.GetPacketSequenceNumber() << " Len " << header.GetPacketLength() << std::endl;
-  for (const auto &message : messages) {
-      std::cout << "Message - Type: " << message.GetMessageType () << " Seq " << message.GetMessageSequenceNumber () 
-                << " Originator " <<  message.GetOriginatorAddress() << " Hop count " << +message.GetHopCount () <<   std::endl;
-  } */
-}
-
-
-void TxRoutingPacketBatman(const ns3::batmand::OGMHeader &header, const ns3::batmand::MessageList &messages) 
-{
-  txRoutingPktCounter ++;
-  //txRoutingByteCounter += header.GetPacketLength(); //The header is not having the correct lenght....
-
-/*  std::cout <<Simulator::Now().GetSeconds () 
-            << " BATMAN TX - Header:  Seq " << header.GetPacketSequenceNumber() << " Len " << header.GetPacketLength() 
-            << " Originator " <<  header.GetOriginatorAddress () <<  " Forwarder " <<  header.GetForwarderAddress () 
-            << " N messages: " << messages.size () << std::endl; 
- */
-  for (const auto &message : messages) {
-//      std::cout << "Message - Len: " << message.GetPacketLength () <<   std::endl;
-      txRoutingByteCounter += message.GetPacketLength ();
+  if (Simulator::Now() > g_startTrafficTime)
+  {
+    //Only collect stats for traffic direceted to this UE
+    if (psschStatsParams.m_dstL2Id == stats->m_l2Id)
+    {
+      if (psschStatsParams.m_corrupt)
+      {
+        stats->m_stats.nCorruptRxData ++;
+      }
+      else
+      {
+        stats->m_stats.nRxData ++;
+      }
+    } 
   }
 }
 
-void RxRoutingPacketBatman(const ns3::batmand::OGMHeader &header, const ns3::batmand::MessageList &messages) 
-{
-  rxRoutingPktCounter ++;
-  //rxRoutingByteCounter += header.GetPacketLength(); //The header is not having the correct lenght....
-
- /*  std::cout <<Simulator::Now().GetSeconds () 
-            << " BATMAN RX - Header:  Seq " << header.GetPacketSequenceNumber() << " Len " << header.GetPacketLength() 
-            << " Originator " <<  header.GetOriginatorAddress () <<  " Forwarder " <<  header.GetForwarderAddress () 
-            << " N messages: " << messages.size () << std::endl;
+/*
+* TODO
 */
-  for (const auto &message : messages) {
-//      std::cout << "Message - Len: " << message.GetPacketLength () <<   std::endl;
-      rxRoutingByteCounter += message.GetPacketLength ();
+void
+TraceSlPscchRxHd (NodePhyStats *stats, uint64_t oldValue, uint64_t newValue)
+{
+  if (Simulator::Now() > g_startTrafficTime)
+  {
+    stats->m_stats.nHdRxCtrl ++;
+  }
+}
+
+/*
+* TODO
+*/
+void
+TraceSlPsschRxHd (NodePhyStats *stats, uint64_t oldValue, uint64_t newValue)
+{
+  if (Simulator::Now() > g_startTrafficTime)
+  {
+    stats->m_stats.nHdRxData ++;
+  }
+}
+
+/*
+* TODO
+*/
+void
+TraceSlPsschRxIg (NodePhyStats *stats, uint64_t oldValue, uint64_t newValue)
+{
+  if (Simulator::Now() > g_startTrafficTime)
+  {
+    stats->m_stats.nIgnoredData ++;
   }
 }
 
@@ -606,13 +799,14 @@ int
 main (int argc, char *argv[])
 {
   
+  bool useDb = true;
   std::string routingAlgo = "BATMAN";
 
   
   //Topology parameters
   uint16_t nUes = 3;
   uint16_t d = 60; //meters
-  std::string deployment = "Linear";
+  std::string deployment = "SqrRand";
   bool prioToSps = false;
 
   uint16_t nPaths = 1;
@@ -620,8 +814,8 @@ main (int argc, char *argv[])
   std::string propagationType = "3GPP";
 
   // Simulation timeline parameters
-  Time startTrafficTime = Seconds (30.0); //Time to start the traffic in the application layer.
-  Time trafficDuration = Seconds (60.0); 
+  Time startTrafficTime = Seconds (60.0); //Time to start the traffic in the application layer.
+  Time trafficDuration = Seconds (5*60.0);
 
   // NR parameters
   uint16_t numerologyBwpSl = 0; //The numerology to be used in sidelink bandwidth part
@@ -634,28 +828,39 @@ main (int argc, char *argv[])
   // SL parameters
   bool sensing = false;
   uint32_t maxNumTx = 1;
+  std::string harqType = "No";  //TODO: Not implemented yet!
 
-    // Traffic parameters
+  // Traffic parameters
   uint32_t udpPacketSize = 60; //bytes
   double dataRate = 24; //kbps
+
+  //Scenario parameter
+  uint16_t nDisrupt = 0; //Number of route disruptions
+  double interval = 1.0; //s
 
   CommandLine cmd;
   cmd.AddValue ("nUes", "The number of UEs in the topology", nUes);
   cmd.AddValue ("deployment", "The type of deployment. Options: Linear/SqrRand/SqrGrid", deployment);
   cmd.AddValue ("d", "The side of the square when using SqrGrid or SqrRand topologies, or the distance between first and last UE when using linear topology", d);
-  cmd.AddValue ("routingAlgo", "The routing algorithm ", routingAlgo);
+  cmd.AddValue ("routingAlgo", "The routing algorithm. Options: OLSR/BATMAN ", routingAlgo);
   cmd.AddValue ("mu", "The numerology to be used in sidelink bandwidth part", numerologyBwpSl);
   cmd.AddValue ("sensing", "If true, it enables the sensing based resource selection for SL, otherwise, no sensing is applied", sensing);
   cmd.AddValue ("maxNumTx", "The maximum numeber of transmissions in the PSSCH", maxNumTx);
   cmd.AddValue ("packetSizeBe", "packet size in bytes to be used by the traffic", udpPacketSize);
   cmd.AddValue ("dataRate", "The data rate in kilobits per second", dataRate);
-  cmd.AddValue ("nPaths", "The number of path to create", nPaths);
+  cmd.AddValue ("nPaths", "The number of paths to create", nPaths);
   cmd.AddValue ("propagationType", "The propagation type to use", propagationType);
+  cmd.AddValue ("nDisrupt", "The number of route disruptions during traffic", nDisrupt);
+  cmd.AddValue ("interval", "The intervalu used by the routing protocol", interval);
+  cmd.AddValue ("harqType", "The type of HARQ used in the SL. Options No/Blind/Feedback. TODO: Not implemented yet!", harqType);
 
   // Parse the command line
   cmd.Parse (argc, argv);
-  g_d = d;
 
+
+
+  g_d = d;
+  g_startTrafficTime = startTrafficTime;
   Time stopTrafficTime = startTrafficTime + trafficDuration;
 
   //Check if the frequency is in the allowed range.
@@ -1004,16 +1209,13 @@ main (int argc, char *argv[])
   * Configure the IPv4 stack
   */
   BatmandHelper batman;
+  Config::SetDefault ("ns3::batmand::RoutingProtocol::OGMInterval", TimeValue (Seconds (interval)));
+  Config::SetDefault ("ns3::olsr::RoutingProtocol::HelloInterval", TimeValue (Seconds (interval)));
 
-  Config::SetDefault ("ns3::olsr::RoutingProtocol::TcInterval", TimeValue (Seconds (2.0)));
   OlsrHelper olsr;        
-//  DsdvHelper dsdv;
-//  AodvHelper aodv;
   
-  Ipv4StaticRoutingHelper staticRouting;
   Ipv4ListRoutingHelper list;
   uint16_t routingPort = 0;
-  list.Add (staticRouting, 0);
   
   if (routingAlgo == "OLSR")
   {
@@ -1025,21 +1227,22 @@ main (int argc, char *argv[])
     list.Add (batman, 10);
     routingPort = 4305;
   }
-  // else if (routingAlgo == "AODV")
-  // {
-  //   list.Add (aodv, 10);
-  // }
-  // else if (routingAlgo == "DSDV")
-  // {
-  //   list.Add (dsdv, 10);
-  // }
   else {
     //Error
   }
   InternetStackHelper internet;
   internet.SetRoutingHelper (list); 
   internet.Install (ueNodes);
-  internet.AssignStreams( ueNodes, 2043210 );
+  internet.AssignStreams( ueNodes, 90000 );
+
+  if (routingAlgo == "OLSR")
+  {
+    olsr.AssignStreams (ueNodes, 80000);
+  }
+  else if (routingAlgo == "BATMAN")
+  {
+    batman.AssignStreams (ueNodes, 80000);
+  }
 
   // Install Ipv4 addresses
   Ipv4AddressHelper address;
@@ -1094,8 +1297,6 @@ main (int argc, char *argv[])
       srcNodeId = GetRandomNodeId (ueNodes, randomVariableNodes);
       tgtNodeId = GetRandomNodeId (ueNodes, randomVariableNodes);
     } while (srcNodeId == tgtNodeId);
-    
-   
 
 
     FlowInfo fInfo;
@@ -1108,7 +1309,9 @@ main (int argc, char *argv[])
 
     SidelinkInfo slInfoTraffic;
     slInfoTraffic.m_castType = SidelinkInfo::CastType::Unicast;
-    slInfoTraffic.m_dynamic = true;
+    slInfoTraffic.m_dynamic = false;
+    slInfoTraffic.m_rri = MilliSeconds (20);
+
     fInfo.slInfo = slInfoTraffic;
 
     flows.push_back (fInfo);
@@ -1118,17 +1321,22 @@ main (int argc, char *argv[])
     routingTracefilename << "routing-trace_path_" << fInfo.id << ".csv";
     Ptr<OutputStreamWrapper> routingPathStream = Create<OutputStreamWrapper>(routingTracefilename.str(), std::ios::out);
     *routingPathStream->GetStream()  << "Time(s)" << "," << "srcIp" << "," << "srcNodeId" << "," << "tgtIp" << "," << "tgtNodeId" << "," << "PathNodeIds" << std::endl;;
-    TraceRoute(nrSlProseHelper, std::ref(flows.back()), ueNodes, routingPathStream, Seconds (1.0),"nan");
-    //Simulator::Schedule(stopTrafficTime, &TraceRoute, srcNodeId, tgtNodeId, ueNodes, routingPathStream, Seconds (1.0),"nan");
+    CheckRoute(nrSlProseHelper, std::ref(flows.back()), ueNodes, routingPathStream, Seconds (0.001),"nan");
 
     //Pertrubation/Disruption
     //Simulator::Schedule(Seconds (45.0), &SetNodeTxPower, 4, ueNodes, 0.0);
 
-   
+    if (nDisrupt > 0)
+    {
+      std::cout << "Scheduling disruption(s) for flow " << flows.back().id <<":" << std::endl;
+      for (uint16_t n =1 ; n <= nDisrupt; n++)
+      {
+        Time disruptionTime = startTrafficTime + Seconds (n * (trafficDuration.GetSeconds () / (nDisrupt+1)));
+        std::cout <<  " at " << disruptionTime.GetSeconds () << std::endl;
+        Simulator::Schedule(disruptionTime, &CreateDisruption, std::ref(flows.back()), ueNodes);
 
-    //Simulator::Schedule(startTrafficTime - Seconds(2), &ConfigureStaticRoute, nrSlProseHelper, std::ref(flows.back()),  ueNodes, slInfoTraffic,  tgtPort);
-
-
+      }
+    }
     /*
     * Configure the applications:
     * - Client app: OnOff application configured to generate CBR traffic.
@@ -1148,18 +1356,17 @@ main (int argc, char *argv[])
 
     std::string dataRateString = std::to_string (dataRate) + "kb/s";
 
-
-    std::cout << "Traffic flows: " << std::endl;
     OnOffHelper sidelinkClient ("ns3::UdpSocketFactory",
                                 InetSocketAddress (GetIpFromNodeId(tgtNodeId, ueNodes), tgtPort)); //Towards target UE and port
     sidelinkClient.SetAttribute ("EnableSeqTsSizeHeader", BooleanValue (true));
     sidelinkClient.SetConstantRate (DataRate (dataRateString), udpPacketSize);
     ApplicationContainer app = sidelinkClient.Install (GetNodeById(ueNodes, srcNodeId)); // Installed in source UE 
-    Time appStart = startTrafficTime + Seconds (startTimeRnd->GetValue ());
-    app.Start (appStart);
+    Time appStartTime = startTrafficTime + Seconds (startTimeRnd->GetValue ());
+    app.Start (appStartTime);
+    app.Stop (stopTrafficTime);
     clientApps.Add (app);
     std::cout << "Flow " << fInfo.id << ", " << GetIpFromNodeId(srcNodeId, ueNodes) << "(Node ID " <<srcNodeId << ") -> " << GetIpFromNodeId(tgtNodeId, ueNodes)<< "(Node ID " <<tgtNodeId  << "):" << tgtPort
-              << " start time: " << appStart.GetSeconds ()
+              << " start time: " << appStartTime.GetSeconds ()
               << " s, end time: " <<  stopTrafficTime.GetSeconds () << " s" << std::endl;
 
     PacketSinkHelper sidelinkSink ("ns3::UdpSocketFactory",
@@ -1172,7 +1379,6 @@ main (int argc, char *argv[])
   }
 
 
-
   /*
    * Hook the traces
    */
@@ -1180,33 +1386,33 @@ main (int argc, char *argv[])
   //Database setup
   std::string exampleName = "nr-prose-u2u-multihop";
   SQLiteOutput db (exampleName + ".db");
-
   UeMacPscchTxOutputStats pscchStats;
-  pscchStats.SetDb (&db, "pscchTxUeMac");
-  Config::ConnectWithoutContext ("/NodeList/*/DeviceList/*/$ns3::NrUeNetDevice/"
-                                 "ComponentCarrierMapUe/*/NrUeMac/SlPscchScheduling",
-                                 MakeBoundCallback (&NotifySlPscchScheduling, &pscchStats));
-
   UeMacPsschTxOutputStats psschStats;
-  psschStats.SetDb (&db, "psschTxUeMac");
-  Config::ConnectWithoutContext ("/NodeList/*/DeviceList/*/$ns3::NrUeNetDevice/"
-                                 "ComponentCarrierMapUe/*/NrUeMac/SlPsschScheduling",
-                                 MakeBoundCallback (&NotifySlPsschScheduling, &psschStats));
-
   UePhyPscchRxOutputStats pscchPhyStats;
-  pscchPhyStats.SetDb (&db, "pscchRxUePhy");
-  Config::ConnectWithoutContext (
-      "/NodeList/*/DeviceList/*/$ns3::NrUeNetDevice/ComponentCarrierMapUe/*/NrUePhy/"
-      "SpectrumPhy/RxPscchTraceUe",
-      MakeBoundCallback (&NotifySlPscchRx, &pscchPhyStats));
-
   UePhyPsschRxOutputStats psschPhyStats;
-  psschPhyStats.SetDb (&db, "psschRxUePhy");
-  Config::ConnectWithoutContext (
-      "/NodeList/*/DeviceList/*/$ns3::NrUeNetDevice/ComponentCarrierMapUe/*/NrUePhy/"
-      "SpectrumPhy/RxPsschTraceUe",
-      MakeBoundCallback (&NotifySlPsschRx, &psschPhyStats));
 
+  if (useDb)
+  {
+    pscchStats.SetDb (&db, "pscchTxUeMac");
+    Config::ConnectWithoutContext ("/NodeList/*/DeviceList/*/$ns3::NrUeNetDevice/"
+                                  "ComponentCarrierMapUe/*/NrUeMac/SlPscchScheduling",
+                                  MakeBoundCallback (&NotifySlPscchScheduling, &pscchStats));
+
+    psschStats.SetDb (&db, "psschTxUeMac");
+    Config::ConnectWithoutContext ("/NodeList/*/DeviceList/*/$ns3::NrUeNetDevice/"
+                                  "ComponentCarrierMapUe/*/NrUeMac/SlPsschScheduling",
+                                  MakeBoundCallback (&NotifySlPsschScheduling, &psschStats));
+
+    pscchPhyStats.SetDb (&db, "pscchRxUePhy");
+    Config::ConnectWithoutContext (
+        "/NodeList/*/DeviceList/*/$ns3::NrUeNetDevice/ComponentCarrierMapUe/*/$ns3::BandwidthPartUe/NrUePhy/$ns3::NrUePhy/NrSpectrumPhy/$ns3::NrSpectrumPhy/RxPscchTraceUe",
+        MakeBoundCallback (&NotifySlPscchRx, &pscchPhyStats));
+
+    psschPhyStats.SetDb (&db, "psschRxUePhy");
+    Config::ConnectWithoutContext (
+        "/NodeList/*/DeviceList/*/$ns3::NrUeNetDevice/ComponentCarrierMapUe/*/$ns3::BandwidthPartUe/NrUePhy/$ns3::NrUePhy/NrSpectrumPhy/$ns3::NrSpectrumPhy/RxPsschTraceUe",
+        MakeBoundCallback (&NotifySlPsschRx, &psschPhyStats));
+  }
  
   AsciiTraceHelper ascii;
   Ptr<OutputStreamWrapper> RelayNasRxPacketTraceStream = ascii.CreateFileStream ("NrSlRelayNasRxPacketTrace.txt");
@@ -1242,14 +1448,72 @@ main (int argc, char *argv[])
   }
   else if (routingAlgo == "BATMAN")
   {
-    path << "/NodeList/*/$ns3::Node/$ns3::batmand::RoutingProtocol/Tx";
-    ns3::Config::ConnectWithoutContext(path.str (),ns3::MakeCallback(&TxRoutingPacketBatman));
-    path.str ("");
-    path << "/NodeList/*/$ns3::Node/$ns3::batmand::RoutingProtocol/Rx";
-    ns3::Config::ConnectWithoutContext(path.str (),ns3::MakeCallback(&RxRoutingPacketBatman));
-    path.str ("");
+    for (uint32_t i = 0; i < nUes; i++)
+    {
+      std::string nodeId = std::to_string(i);
+      path << "/NodeList/"<<nodeId<<"/$ns3::Node/$ns3::batmand::RoutingProtocol/Tx";
+      Config::ConnectWithoutContext(path.str (),MakeBoundCallback(&TxRoutingPacketBatman,nodeId));
+      path.str ("");
+      path << "/NodeList/"<<nodeId<<"/$ns3::Node/$ns3::batmand::RoutingProtocol/Rx";
+      Config::ConnectWithoutContext(path.str (),MakeBoundCallback(&RxRoutingPacketBatman, nodeId));
+      path.str ("");
+    }
   }
 
+  //Trace grant drops
+  for (uint32_t i = 0; i < nUes; i++)
+  {
+    std::string nodeId = std::to_string(i);
+    path << "/NodeList/"<<nodeId<<"/DeviceList/*/$ns3::NrUeNetDevice/ComponentCarrierMapUe/*/NrUeMac/NrSlGrantDrop";
+    Config::ConnectWithoutContext (path.str (), MakeBoundCallback (&TraceGrantDrops, nodeId));
+    path.str ("");
+
+    path << "/NodeList/"<<nodeId<<"/DeviceList/*/$ns3::NrUeNetDevice/ComponentCarrierMapUe/*/$ns3::BandwidthPartUe/NrUeMac/$ns3::NrSlUeMac/NrSlUeMacScheduler/$ns3::NrSlUeMacSchedulerFixedMcs/NrSlGrantDrop";
+    Config::ConnectWithoutContext (path.str (), MakeBoundCallback (&TraceGrantDrops, nodeId));
+    path.str ("");
+  }
+  //Trace PHY losses
+  std::map<uint32_t, NodePhyStats*> nodePhyStats;
+   for (uint32_t i = 0; i < uesNetDev.GetN (); ++i)
+   {
+
+
+       uint32_t nodeId = uesNetDev.Get (i)->GetNode ()->GetId ();
+       NodePhyStats* stats = new NodePhyStats(); // Create a new NodePhyStats object
+       stats->m_nodeId = nodeId;
+
+       Ptr<LteUeRrc> rrc = uesNetDev.Get (i)->GetObject<NrUeNetDevice> ()->GetRrc ();
+       stats->m_l2Id = rrc->GetSourceL2Id ();
+       nodePhyStats[nodeId] = stats;
+
+      std::ostringstream ossTxCtrl;
+      ossTxCtrl << "/NodeList/" << nodeId << "/DeviceList/*/$ns3::NrUeNetDevice/ComponentCarrierMapUe/*/$ns3::BandwidthPartUe/NrUePhy/$ns3::NrUePhy/NrSpectrumPhy/$ns3::NrSpectrumPhy/TxPscchTrace";
+      Config::ConnectWithoutContext(ossTxCtrl.str(), MakeBoundCallback(&TraceSlPscchTx, stats));
+
+      std::ostringstream ossTxData;
+      ossTxData << "/NodeList/" << nodeId << "/DeviceList/*/$ns3::NrUeNetDevice/ComponentCarrierMapUe/*/$ns3::BandwidthPartUe/NrUePhy/$ns3::NrUePhy/NrSpectrumPhy/$ns3::NrSpectrumPhy/TxPsschTrace";
+      Config::ConnectWithoutContext(ossTxData.str(), MakeBoundCallback(&TraceSlPsschTx, stats));
+
+      std::ostringstream ossRxCtrl;
+      ossRxCtrl << "/NodeList/" << nodeId << "/DeviceList/*/$ns3::NrUeNetDevice/ComponentCarrierMapUe/*/$ns3::BandwidthPartUe/NrUePhy/$ns3::NrUePhy/NrSpectrumPhy/$ns3::NrSpectrumPhy/RxPscchTraceUe";
+      Config::ConnectWithoutContext(ossRxCtrl.str(), MakeBoundCallback(&TraceSlPscchRx, stats));
+
+      std::ostringstream ossRxData;
+      ossRxData << "/NodeList/" << nodeId << "/DeviceList/*/$ns3::NrUeNetDevice/ComponentCarrierMapUe/*/$ns3::BandwidthPartUe/NrUePhy/$ns3::NrUePhy/NrSpectrumPhy/$ns3::NrSpectrumPhy/RxPsschTraceUe";
+      Config::ConnectWithoutContext(ossRxData.str(), MakeBoundCallback(&TraceSlPsschRx, stats));
+
+      std::ostringstream ossRxCtrlHd;
+      ossRxCtrlHd << "/NodeList/" << nodeId << "/DeviceList/*/$ns3::NrUeNetDevice/ComponentCarrierMapUe/*/$ns3::BandwidthPartUe/NrUePhy/$ns3::NrUePhy/NrSpectrumPhy/$ns3::NrSpectrumPhy/SlPscchHalfDuplexDrop";
+      Config::ConnectWithoutContext(ossRxCtrlHd.str(), MakeBoundCallback(&TraceSlPscchRxHd, stats));
+
+      std::ostringstream ossRxDataHd;
+      ossRxDataHd << "/NodeList/" << nodeId << "/DeviceList/*/$ns3::NrUeNetDevice/ComponentCarrierMapUe/*/$ns3::BandwidthPartUe/NrUePhy/$ns3::NrUePhy/NrSpectrumPhy/$ns3::NrSpectrumPhy/SlPsschHalfDuplexDrop";
+      Config::ConnectWithoutContext(ossRxDataHd.str(), MakeBoundCallback(&TraceSlPsschRxHd, stats));
+
+      std::ostringstream ossRxDataIgn;
+      ossRxDataIgn << "/NodeList/" << nodeId << "/DeviceList/*/$ns3::NrUeNetDevice/ComponentCarrierMapUe/*/$ns3::BandwidthPartUe/NrUePhy/$ns3::NrUePhy/NrSpectrumPhy/$ns3::NrSpectrumPhy/SlPsschIgnored";
+      Config::ConnectWithoutContext(ossRxDataIgn.str(), MakeBoundCallback(&TraceSlPsschRxIg, stats));
+   }
 
 
   //Configure FlowMonitor to get traffic flow statistics
@@ -1263,6 +1527,12 @@ main (int argc, char *argv[])
   monitor->SetAttribute ("PacketSizeBinWidth", DoubleValue (20));
 
   Simulator::Stop (stopTrafficTime + Seconds (3.0));
+
+  Config::SetDefault ("ns3::ConfigStore::Filename", StringValue ("ZZZZZZZZZZZZZ.txt"));
+  Config::SetDefault ("ns3::ConfigStore::Mode", StringValue ("Save"));
+  ConfigStore outputConfig;
+  outputConfig.ConfigureDefaults ();
+  outputConfig.ConfigureAttributes ();
 
   Simulator::Run ();
 
@@ -1280,8 +1550,9 @@ main (int argc, char *argv[])
   double sumTput = 0;
   double sumMinNhops = 0;
   double sumMaxNhops = 0;
+  double sumNRouteChanges = 0;
   double numPathsFound = 0;
-
+  double sumNDisruptions = 0;
   //Get per-flow traffic statistics
   monitor->CheckForLostPackets ();
   Ptr<Ipv4FlowClassifier> classifier = DynamicCast<Ipv4FlowClassifier> (flowmonHelper.GetClassifier ());
@@ -1327,7 +1598,7 @@ main (int argc, char *argv[])
   }
 
   outFileFlows.setf (std::ios_base::fixed);
-  outFileFlows << "FlowId,srcIp,tgtIp:tgtPort,srcNodeId,tgtNodeId,minNHops,maxNHops,nRouteChanges,nTxPkts,nRxPkts,LossRatio,MeanDelay,MeanJitter,avgThroughput\n";
+  outFileFlows << "FlowId,srcIp,tgtIp:tgtPort,srcNodeId,tgtNodeId,minNHops,maxNHops,nRouteChanges,nTxPkts,nRxPkts,LossRatio,MeanDelay,MeanJitter,avgThroughput,nDisruptions\n";
   for (auto& flowEntry : flows) 
   {
     outFileFlows << flowEntry.id << ","
@@ -1343,19 +1614,21 @@ main (int argc, char *argv[])
                  << flowEntry.trafficStats.lossRatio << ","
                  << flowEntry.trafficStats.meanDelay << ","
                  << flowEntry.trafficStats.meanJitter << ","
-                 << flowEntry.trafficStats.throughput
+                 << flowEntry.trafficStats.throughput << ","
+                 << flowEntry.nDisruptions
                  << std::endl;
 
 
     if (flowEntry.maxNHops > 0)
     {  
-
       sumMinNhops += flowEntry.minNHops;
       sumMaxNhops += flowEntry.maxNHops;
+      sumNRouteChanges += flowEntry.nRouteChanges;
       sumLoss += flowEntry.trafficStats.lossRatio;
       sumDelay += flowEntry.trafficStats.meanDelay;
       sumJitter += flowEntry.trafficStats.meanJitter;
       sumTput += flowEntry.trafficStats.throughput;
+      sumNDisruptions += flowEntry.nDisruptions;
       numPathsFound ++;
     }
   }
@@ -1379,18 +1652,31 @@ main (int argc, char *argv[])
   }
   outFileSys.setf (std::ios_base::fixed);
   outFileSys << "RngSeed,RngRun,"; 
-  outFileSys << "sysNTxPkts,sysNRxPkts,sysLossRatio,sysThroughput,";
+  outFileSys << "sysNTxPkts,sysNRxPkts,";
+  outFileSys << "sysLossRatio,";
+  outFileSys << "sysThroughput,";
   outFileSys << "avgMinNHops,avgMaxNHops,avgFlowLossRatio,avgFlowMeanDelay,avgFlowMeanJitter,avgFlowThroughput,"
              << "ratioPathsFound,"
-             << "sysNTxRoutingPkts,"
-             << "sysRoutingOhPkt,sysRoutingOhBytes\n";
+             << "sysNRouteChanges,sysNTxRoutingPkts,"
+             << "sysRoutingOhPkt,sysRoutingOhBytes,"
+             << "avgNDisruptions,"
+             << "nGrantDrops\n";
 
   outFileSys << RngSeedManager::GetSeed ()<< ","
              << RngSeedManager::GetRun ()<< ","
              << txPktCounter << ","
-             << rxPktCounter << ","
-             << ((double) (txPktCounter - rxPktCounter) / txPktCounter) << ","
-             << ((double) (rxByteCounter) / trafficDuration.GetSeconds ()) * 8 / 1000.0 << ","; //kbps 
+             << rxPktCounter << ",";
+
+  if (txPktCounter > 0)
+  {
+    outFileSys << ((double) (txPktCounter - rxPktCounter) / txPktCounter) << ",";
+  }
+  else
+  {
+    outFileSys << "NaN" << ",";
+  }
+
+  outFileSys << ((double) (rxByteCounter) / trafficDuration.GetSeconds ()) * 8 / 1000.0 << ","; //kbps 
 
   if (numPathsFound > 0)
   {
@@ -1406,9 +1692,25 @@ main (int argc, char *argv[])
     outFileSys << "NaN"<< "," << "NaN"<< "," "NaN" << "," << "NaN" << "," << "NaN"<< "," << "NaN" << ",";
   }
   outFileSys << numPathsFound / nPaths <<  ","; 
-  outFileSys << txRoutingPktCounter  << ","; 
-  outFileSys << (double) txRoutingPktCounter / txPktCounter << "," 
-             << (double) txRoutingByteCounter / txByteCounter;
+  if (numPathsFound > 0)
+  {
+    outFileSys << sumNRouteChanges<< "," << txRoutingPktCounter  << ",";
+    if (txPktCounter > 0)
+    {
+      outFileSys << (double) txRoutingPktCounter / txPktCounter << ","
+              << (double) txRoutingByteCounter / txByteCounter<< ",";
+    }
+    else
+    {
+      outFileSys << "NaN"<< "," << "NaN"<< ",";
+    }
+    outFileSys << sumNDisruptions/ numPathsFound<< ",";
+  }
+  else
+  {
+    outFileSys << "NaN"<< "," << "NaN"<< "," "NaN" << "," << "NaN"<< "," << "NaN"<< ",";;
+  }
+  outFileSys <<nGrantDrops;
   outFileSys << std::endl;
   outFileSys.close ();
 
@@ -1433,15 +1735,149 @@ main (int argc, char *argv[])
     std::cout << it->first << "\t\t" << it->second << std::endl;
   }
 
-  /*
-   * IMPORTANT: Do not forget to empty the database cache, which would
-   * dump the data store towards the end of the simulation in to a database.
-   */
-  pscchStats.EmptyCache ();
-  psschStats.EmptyCache ();
-  pscchPhyStats.EmptyCache ();
-  psschPhyStats.EmptyCache ();
+  //Print PHY stats
+  uint64_t totalnTxCtrl = 0;
+  uint64_t totalnTxData = 0;
+  uint64_t totalnRxCtrl = 0;
+  uint64_t totalnRxData = 0;
+  uint64_t totalnCorruptRxCtrl = 0;
+  uint64_t totalnCorruptRxData = 0;
+  uint64_t totalnHdRxCtrl = 0;
+  uint64_t totalnHdRxData = 0;
+  uint64_t totalnIgnoredData = 0;
 
+  std::cout << "\n Phy statistics:"  << std::endl;
+  std::cout << std::left << std::setw(8) << "Node ID" << "| "
+            << std::setw(8) << "L2 ID" << "| "
+            << std::setw(8) << "nTxCtrl" << "| "
+            << std::setw(8) << "nTxData" << "| "
+            << std::setw(8) << "nRxCtrl" << "| "
+            << std::setw(8) << "nRxData" << "| "
+            << std::setw(16) << "nCorruptRxCtrl" << "| "
+            << std::setw(16) << "nCorruptRxData" << "| "
+            << std::setw(12) << "nHdRxCtrl" << "| "
+            << std::setw(12) << "nHdRxData" << "| "
+            << std::setw(12) << "nIgnoredData" << std::endl;
+  std::cout << "----------------------------------------------------------------------------------------------------------------------------------------" << std::endl;
+  for (const auto& [nodeId, stats] : nodePhyStats)
+  {
+    std::cout << std::left << std::setw(8) << stats->m_nodeId << "| "
+              << std::setw(8) << stats->m_l2Id << "| "
+              << std::setw(8) << stats->m_stats.nTxCtrl << "| "
+              << std::setw(8) << stats->m_stats.nTxData << "| "
+              << std::setw(8) << stats->m_stats.nRxCtrl << "| "
+              << std::setw(8) << stats->m_stats.nRxData << "| "
+              << std::setw(16) << stats->m_stats.nCorruptRxCtrl << "| "
+              << std::setw(16) << stats->m_stats.nCorruptRxData << "| "
+              << std::setw(12) << stats->m_stats.nHdRxCtrl << "| "
+              << std::setw(12) << stats->m_stats.nHdRxData << "| "
+              << std::setw(12) << stats->m_stats.nIgnoredData << std::endl;
+
+    totalnTxCtrl += stats->m_stats.nTxCtrl;
+    totalnTxData += stats->m_stats.nTxData;
+    totalnRxCtrl += stats->m_stats.nRxCtrl;
+    totalnRxData += stats->m_stats.nRxData;
+    totalnCorruptRxCtrl += stats->m_stats.nCorruptRxCtrl;
+    totalnCorruptRxData += stats->m_stats.nCorruptRxData;
+    totalnHdRxCtrl += stats->m_stats.nHdRxCtrl;
+    totalnHdRxData += stats->m_stats.nHdRxData ;
+    totalnIgnoredData += stats->m_stats.nIgnoredData;
+  }
+  std::cout << "----------------------------------------------------------------------------------------------------------------------------------------" << std::endl;
+  std::cout << std::left << std::setw(18) << "Total" << "| "
+            << std::setw(8) << totalnTxCtrl << "| "
+            << std::setw(8) << totalnTxData << "| "
+            << std::setw(8) << totalnRxCtrl << "| "
+            << std::setw(8) << totalnRxData << "| "
+            << std::setw(16) << totalnCorruptRxCtrl << "| "
+            << std::setw(16) << totalnCorruptRxData << "| "
+            << std::setw(12) << totalnHdRxCtrl << "| "
+            << std::setw(12) << totalnHdRxData << "| "
+            << std::setw(12) << totalnIgnoredData << std::endl;
+  std::cout << "----------------------------------------------------------------------------------------------------------------------------------------" << std::endl;
+
+  std::cout << "Balance Control: " << totalnTxCtrl - totalnRxCtrl - totalnCorruptRxCtrl - totalnHdRxCtrl <<std::endl;
+  std::cout << "Balance Data: " <<totalnTxData - totalnRxData - totalnCorruptRxData - totalnHdRxData - totalnIgnoredData <<std::endl;
+
+  //Ouput per node PHY stats to csv
+  std::ofstream outFileSysPhyPerNode;
+  std::string filenamePhyStatPerNodes = "simPhyStats_perNode.csv";
+  outFileSysPhyPerNode.open (filenamePhyStatPerNodes.c_str (), std::ofstream::out | std::ofstream::trunc);
+  if (!outFileSysPhyPerNode.is_open ())
+  {
+    std::cerr << "Can't open file " << filenamePhyStatPerNodes << std::endl;
+    return 1;
+  }
+  outFileSysPhyPerNode.setf (std::ios_base::fixed);
+  outFileSysPhyPerNode << "RngSeed,RngRun,";
+  outFileSysPhyPerNode << "NodeID" << ","
+                       << "L2ID" << ","
+                       << "nTxCtrl" << ","
+                       <<  "nTxData" << ","
+                       << "nRxCtrl" << ","
+                       << "nRxData" << ","
+                       << "nCorruptRxCtrl" << ","
+                       << "nCorruptRxData" << ","
+                       << "nHdRxCtrl" << ","
+                       << "nHdRxData" << ","
+                       << "nIgnoredData\n";
+  for (const auto& [nodeId, stats] : nodePhyStats)
+  {
+    outFileSysPhyPerNode << RngSeedManager::GetSeed ()<< ","
+                         << RngSeedManager::GetRun ()<< ",";
+    outFileSysPhyPerNode << stats->m_nodeId << ","
+                         << stats->m_l2Id << ","
+                         << stats->m_stats.nTxCtrl << ","
+                         << stats->m_stats.nTxData << ","
+                         << stats->m_stats.nRxCtrl << ","
+                         << stats->m_stats.nRxData << ","
+                         << stats->m_stats.nCorruptRxCtrl << ","
+                         << stats->m_stats.nCorruptRxData << ","
+                         << stats->m_stats.nHdRxCtrl << ","
+                         << stats->m_stats.nHdRxData << ","
+                         << stats->m_stats.nIgnoredData << "\n";
+  }
+  outFileSysPhyPerNode.close ();
+
+
+  //Output total PHY stats to csv
+  std::ofstream outFileSysPhy;
+  std::string filenamePhyStats = "simPhyStats.csv";
+  outFileSysPhy.open (filenamePhyStats.c_str (), std::ofstream::out | std::ofstream::trunc);
+  if (!outFileSysPhy.is_open ())
+  {
+    std::cerr << "Can't open file " << filenamePhyStats << std::endl;
+    return 1;
+  }
+  outFileSysPhy.setf (std::ios_base::fixed);
+  outFileSysPhy << "RngSeed,RngRun,";
+  outFileSysPhy << "totalnTxCtrl,totalnTxData,totalnRxCtrl,totalnRxData,totalnCorruptRxCtrl,totalnCorruptRxData,totalnHdRxCtrl,totalnHdRxData,totalnIgnoredData"<< std::endl;;
+  outFileSysPhy << RngSeedManager::GetSeed ()<< ","
+                << RngSeedManager::GetRun ()<< ",";
+  outFileSysPhy << totalnTxCtrl << ","
+                << totalnTxData << ","
+                << totalnRxCtrl << ","
+                << totalnRxData << ","
+                << totalnCorruptRxCtrl << ","
+                << totalnCorruptRxData << ","
+                << totalnHdRxCtrl << ","
+                << totalnHdRxData << ","
+                << totalnIgnoredData << std::endl;
+  outFileSysPhy.close ();
+
+
+
+  if (useDb)
+  {
+    /*
+    * IMPORTANT: Do not forget to empty the database cache, which would
+    * dump the data store towards the end of the simulation in to a database.
+    */
+    pscchStats.EmptyCache ();
+    psschStats.EmptyCache ();
+    pscchPhyStats.EmptyCache ();
+    psschPhyStats.EmptyCache ();
+  }
   Simulator::Destroy ();
 
   return 0;
