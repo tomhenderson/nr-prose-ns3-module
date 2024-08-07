@@ -434,39 +434,41 @@ CheckRoute (Ptr<NrSlProseHelper> nrSlProseHelper, FlowInfo& flowInfo, NodeContai
     }
 
     //Check if the path changed
-    if (!path.empty() && currPath.str () != prevPath)
+    if (currPath.str () != prevPath)
     {
       std::cout << "Flow " << flowInfo.id << " changed route, previous: " << prevPath << ", new: " << currPath.str () <<std::endl;
       *trace->GetStream()<< std::fixed << std::setprecision(3)  << Simulator::Now().GetSeconds() << "," << srcIp << "," << flowInfo.srcNodeId << "," << tgtIp << "," << flowInfo.tgtNodeId << ","<< currPath.str () << std::endl;
 
       PrintRoutingTables (ueNodes);
-      
-      //Update flow info data
-      if (Simulator::Now() > g_startTrafficTime)
+      if (!path.empty())
       {
-        flowInfo.nRouteChanges ++;
-        if (path.size () -1 <= flowInfo.minNHops )
-          {
-            flowInfo.minNHops = path.size () -1;
-          }
-          if (path.size () -1 >= flowInfo.maxNHops)
-          {
-            flowInfo.maxNHops = path.size () -1;
-          }
-      }
-      //Configure new route
-      //Clear old dev path
-      flowInfo.ueDevPath.clear ();
+        //Update flow info data
+        if (Simulator::Now() > g_startTrafficTime)
+        {
+          flowInfo.nRouteChanges ++;
+          if (path.size () -1 <= flowInfo.minNHops )
+            {
+              flowInfo.minNHops = path.size () -1;
+            }
+            if (path.size () -1 >= flowInfo.maxNHops)
+            {
+              flowInfo.maxNHops = path.size () -1;
+            }
+        }
+        //Configure new route
+        //Clear old dev path
+        flowInfo.ueDevPath.clear ();
 
-      //Create dev path
-      for (size_t i = 0; i < path.size(); ++i) {
-        Ptr<Node> currentNode = ueNodes.Get(path[i]);
-        Ptr<NrUeNetDevice> netDevPtr = currentNode->GetDevice (0)->GetObject<NrUeNetDevice> ();
-        flowInfo.ueDevPath.push_back (netDevPtr);
+        //Create dev path
+        for (size_t i = 0; i < path.size(); ++i) {
+          Ptr<Node> currentNode = ueNodes.Get(path[i]);
+          Ptr<NrUeNetDevice> netDevPtr = currentNode->GetDevice (0)->GetObject<NrUeNetDevice> ();
+          flowInfo.ueDevPath.push_back (netDevPtr);
+        }
+
+        //Call the helper
+        nrSlProseHelper->ConfigureU2uRelayPath (flowInfo.srcIp , flowInfo.tgtIp, flowInfo.tgtPort, flowInfo.slInfo, flowInfo.ueDevPath);
       }
-      
-      //Call the helper
-      nrSlProseHelper->ConfigureU2uRelayPath (flowInfo.srcIp , flowInfo.tgtIp, flowInfo.tgtPort, flowInfo.slInfo, flowInfo.ueDevPath);
     }
 
     Simulator::Schedule(interval, &CheckRoute, nrSlProseHelper, std::ref(flowInfo), ueNodes, trace, interval, currPath.str ()); //Call it with prevPath = currPath
@@ -799,7 +801,7 @@ int
 main (int argc, char *argv[])
 {
   
-  bool useDb = true;
+  bool useDb = false;
   std::string routingAlgo = "BATMAN";
 
   
@@ -826,9 +828,9 @@ main (int argc, char *argv[])
   uint32_t mcs = 5; 
 
   // SL parameters
-  bool sensing = false;
+  bool sensing = true;
   uint32_t maxNumTx = 1;
-  std::string harqType = "No";  //TODO: Not implemented yet!
+  std::string harqType = "No";  
 
   // Traffic parameters
   uint32_t udpPacketSize = 60; //bytes
@@ -852,7 +854,7 @@ main (int argc, char *argv[])
   cmd.AddValue ("propagationType", "The propagation type to use", propagationType);
   cmd.AddValue ("nDisrupt", "The number of route disruptions during traffic", nDisrupt);
   cmd.AddValue ("interval", "The intervalu used by the routing protocol", interval);
-  cmd.AddValue ("harqType", "The type of HARQ used in the SL. Options No/Blind/Feedback. TODO: Not implemented yet!", harqType);
+  cmd.AddValue ("harqType", "The type of HARQ used in the SL. Options No/Blind/Feedback1/Feedback2/Feedback4", harqType);
 
   // Parse the command line
   cmd.Parse (argc, argv);
@@ -977,7 +979,7 @@ main (int argc, char *argv[])
   {
       std::unique_ptr<BandwidthPartInfo> bwp1 (new BandwidthPartInfo (1, centralFrequencyBandSl, bandwidthBandSl));
       auto spectrumChannel = CreateObject<MultiModelSpectrumChannel> ();
-      // Default range is 250 m
+      Config::SetDefault("ns3::RangePropagationLossModel::MaxRange", DoubleValue(500));
       auto propagationLoss = CreateObject<RangePropagationLossModel> ();
       spectrumChannel->AddPropagationLossModel (propagationLoss);
       bwp1->m_channel = spectrumChannel;
@@ -1115,6 +1117,24 @@ main (int argc, char *argv[])
   ptrFactory->SetSlMaxNumPerReserve (3);
   std::list<uint16_t> resourceReservePeriodList = {0, 20}; // in ms
   ptrFactory->SetSlResourceReservePeriodList (resourceReservePeriodList);
+  ptrFactory->SetSlMinTimeGapPsfch (3);
+  if (harqType == "Blind")
+  {
+    ptrFactory->SetSlPsfchPeriod (0); //0 (blind)
+  } else if (harqType == "Feedback1")
+  {
+    ptrFactory->SetSlPsfchPeriod (1); //1 (every slot)
+  }else if (harqType == "Feedback1")
+  {
+    ptrFactory->SetSlPsfchPeriod (2); //2 (every 2 slots)
+  }else if (harqType == "Feedback2")
+  {
+    ptrFactory->SetSlPsfchPeriod (4); //4 (every 4 slots)
+  } else
+  {
+    ptrFactory->SetSlPsfchPeriod (0); //0 (blind)
+  }
+
   //Once parameters are configured, we can create the pool
   LteRrcSap::SlResourcePoolNr pool = ptrFactory->CreatePool ();
   slResourcePoolNr = pool;
@@ -1310,8 +1330,11 @@ main (int argc, char *argv[])
     SidelinkInfo slInfoTraffic;
     slInfoTraffic.m_castType = SidelinkInfo::CastType::Unicast;
     slInfoTraffic.m_dynamic = false;
-    slInfoTraffic.m_rri = MilliSeconds (20);
-
+    slInfoTraffic.m_rri = MilliSeconds (20); 
+    if(harqType != "No")
+    {
+      slInfoTraffic.m_harqEnabled = true;
+    }
     fInfo.slInfo = slInfoTraffic;
 
     flows.push_back (fInfo);
